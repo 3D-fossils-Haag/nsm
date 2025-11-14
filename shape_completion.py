@@ -6,7 +6,8 @@ import numpy as np
 import pandas as pd
 from NSM.datasets import SDFSamples
 from NSM.models import TriplanarDecoder
-from NSM.mesh import get_sdfs  
+from NSM.mesh import get_sdfs
+from NSM.reconstruct import reconstruct_latent
 import torch.nn.functional as F
 import json
 import pyvista as pv
@@ -26,6 +27,7 @@ os.chdir(TRAIN_DIR)
 CKPT = '3000' # TO DO: Choose the ckpt value you want to analyze results for
 LC_PATH = 'latent_codes' + '/' + CKPT + '.pth'
 MODEL_PATH = 'model' + '/' + CKPT + '.pth'
+partial_specimen = True  # TO DO: indicate if specimen(s) is/are partial
 
 # Load model config
 config_path = 'model_params_config.json'
@@ -37,8 +39,8 @@ device = config.get("device", "cuda:0")
 #mesh_list = random.sample(config['test_paths'], 100)
 mesh_list = random.sample(config['val_paths'], 5) # TO DO: Choose val or test paths
 partial_specimen = True  # TO DO: indicate if specimen is partial
-bbox_list = [os.path.splitext(mesh_item)[0] + ".mrk.json" for mesh_item in mesh_list]
-#mesh_list = config['val_paths']
+# Select corresponding bounding boxes with intact regions of specimens outlined (filenames should match meshes, but with .mrk.json extension)
+bbox_list = [os.path.splitext(mesh_item)[0] + ".mrk.json" for mesh_item in mesh_list] # TO DO: Enter paths here
 
 # monkey patch for mesh handling with pymskt
 def safe_load_mesh_scalars(self):
@@ -130,7 +132,7 @@ def get_top_k_pcs(latent_codes, threshold=0.90):
     return pca, k + 1
 
 # Convert ply file to vtk
-def convert_ply_to_vtk(input_file, output_file=None):
+def convert_ply_to_vtk(input_file, output_file=None, save=False):
     if not input_file.lower().endswith('.ply'):
         raise ValueError("Input file must have a .ply extension.")
     if not os.path.exists(input_file):
@@ -138,27 +140,38 @@ def convert_ply_to_vtk(input_file, output_file=None):
     if output_file is None:
         output_file = os.path.splitext(input_file)[0] + ".vtk"
     mesh = pv.read(input_file)
-    mesh.save(output_file)
+    if save:
+        mesh.save(output_file)
     print(f"Converted {input_file} → {output_file}")
     return mesh, output_file
 
 # Optimize latent from partial pointcloud (model has no encoder, so need to optimize before feeding in new data)
-def optimize_latent_partial(decoder, partial_pts, latent_dim, mean_latent, latent_codes,
-                            iters=2000, lr=1e-4, lambda_reg=1e-3,
-                            clamp_val=None, scheduler_step=1000, scheduler_gamma=0.5, top_k=10,
-                            batch_inference_size=32768, verbose=True, device=device):
+def optimize_latent_partial(decoder, partial_pts, latent_dim, mean_latent=None, latent_init=None, iters=2000, 
+                            lr=1e-4, lambda_reg=1e-4, clamp_val=None, scheduler_step=1000, scheduler_gamma=0.5, 
+                            top_k=10, batch_inference_size=32768, verbose=True, device=device, multi_stage=False):
     decoder = decoder.to(device)
     decoder.eval()
     if isinstance(partial_pts, np.ndarray):
-        partial_pts = torch.tensor(partial_pts, dtype=torch.float32)
+        partial_pts, sdfs = sample_near_surface(torch.tensor(partial_pts, dtype=torch.float32), eps=0.005, fraction_nonzero=0.4, 
+                        fraction_far=0.05, far_eps=0.05)
+    else:
+        partial_pts, sdfs = sample_near_surface(partial_pts, eps=0.005, fraction_nonzero=0.4, 
+                        fraction_far=0.05, far_eps=0.05)
+    partial_pts = torch.tensor(partial_pts, dtype=torch.float32)
     partial_pts = partial_pts.to(device)
-    mean_latent = pca_initialize_latent(mean_latent, latent_codes, top_k)
-    latent = mean_latent.clone().to(device).requires_grad_(True)
+    target = torch.tensor(sdfs, dtype=torch.float32).to(device)
+    # If multi-stage optimization, intialize from previous latent, not mean
+    if multi_stage:
+        mean_latent = latent_init.clone().detach()
+        latent = latent_init.clone().detach().to(device).requires_grad_(True)
+    # If single-stage, initialize from pca based mean of latent codes
+    else:
+        mean_latent = mean_latent.clone().detach()
+        latent = pca_initialize_latent(mean_latent, latent_init, top_k).clone().detach()
+        latent = latent.to(device).requires_grad_(True)
     optimizer = torch.optim.Adam([latent], lr=lr)
     scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=scheduler_step, gamma=scheduler_gamma)
     loss_log = []
-    # pseudo SDF targets = 0 (we assume partial points lie on surface)
-    target = torch.zeros((partial_pts.shape[0], 1), device=device)
     for step in range(iters):
         optimizer.zero_grad()
         # Evaluate predicted SDFs in mini-batches to save memory
@@ -175,7 +188,9 @@ def optimize_latent_partial(decoder, partial_pts, latent_dim, mean_latent, laten
         scheduler.step()
         with torch.no_grad():
             if clamp_val is not None:
-                latent.clamp_(-clamp_val, clamp_val)
+                offset = latent - mean_latent.to(latent.device)   # shape (1, D)
+                offset[:] = torch.clamp(offset, -clamp_val, clamp_val) # in-place to offset
+                latent[:] = mean_latent.to(latent.device) + offset
         loss_log.append(float(loss.item()))
         if verbose and (step % 100 == 0 or step == iters-1):
             lr_now = scheduler.get_last_lr()[0] if hasattr(scheduler, 'get_last_lr') else optimizer.param_groups[0]['lr']
@@ -274,6 +289,44 @@ def sample_points_in_bbox(mesh_path, bbox_params, n_points=500, method='poisson'
         pts_inside = pts_inside[idx]
     return pts_inside
 
+def sample_near_surface(surface_pts, eps=0.005, fraction_nonzero=0.3, 
+                        fraction_far=0.05, far_eps=0.05):
+    n_pts = surface_pts.shape[0]
+    # Slightly perturbed points (near-surface)
+    n_nonzero = int(n_pts * fraction_nonzero)
+    idx_near = torch.randperm(n_pts)[:n_nonzero]
+    base_near = surface_pts[idx_near]
+    dirs_near = torch.randn_like(base_near)
+    dirs_near = dirs_near / torch.norm(dirs_near, dim=1, keepdim=True)
+    pts_out_near = base_near + eps * dirs_near
+    pts_in_near  = base_near - eps * dirs_near
+    sdf_out_near = eps  * torch.ones((n_nonzero, 1), device=surface_pts.device)
+    sdf_in_near  = -eps * torch.ones((n_nonzero, 1), device=surface_pts.device)
+    pts_nonzero = torch.cat([pts_out_near, pts_in_near], dim=0)
+    sdf_nonzero = torch.cat([sdf_out_near, sdf_in_near], dim=0)
+    # Farther-away points for regularization
+    n_far = int(n_pts * fraction_far)
+    idx_far = torch.randperm(n_pts)[:n_far]
+    base_far = surface_pts[idx_far]
+    dirs_far = torch.randn_like(base_far)
+    dirs_far = dirs_far / torch.norm(dirs_far, dim=1, keepdim=True)
+    pts_out_far = base_far + far_eps * dirs_far
+    pts_in_far  = base_far - far_eps * dirs_far
+    sdf_out_far = far_eps  * torch.ones((n_far, 1), device=surface_pts.device)
+    sdf_in_far  = -far_eps * torch.ones((n_far, 1), device=surface_pts.device)
+    pts_far = torch.cat([pts_out_far, pts_in_far], dim=0)
+    sdf_far = torch.cat([sdf_out_far, sdf_in_far], dim=0)
+    # Keep remaining points exactly on the surface (SDF=0)
+    mask = torch.ones(n_pts, dtype=torch.bool)
+    mask[idx_near] = False
+    mask[idx_far] = False
+    pts_zero = surface_pts[mask]
+    sdf_zero = torch.zeros((pts_zero.shape[0], 1), device=surface_pts.device)
+    # Combine everything
+    pts = torch.cat([pts_zero, pts_nonzero, pts_far], dim=0)
+    sdf = torch.cat([sdf_zero, sdf_nonzero, sdf_far], dim=0)
+    return pts, sdf
+
 # Utility class for ICP transform
 class NumpyTransform:
     def __init__(self, matrix):
@@ -321,14 +374,14 @@ for i, vert_fname in enumerate(mesh_list):
     print(f"\033[32m\n=== Processing {os.path.basename(vert_fname)} ===\033[0m")
     print(f"\033[32m\n=== Mesh {i+1} / {len(mesh_list)} ===\033[0m")
     # Make a new dir to save predictions
-    outfpath = 'novel_meshes/predictions/' + os.path.splitext(os.path.basename(vert_fname))[0]
+    outfpath = 'shape_completion/predictions/' + os.path.splitext(os.path.basename(vert_fname))[0] # TO DO: Adjust to desired outpath
     print("Making a new directory to save model predictions and outputs at: ", outfpath)
     os.makedirs(outfpath, exist_ok=True)
 
     # Convert plys to vtks
     if '.ply' in vert_fname:
         ply_fname = vert_fname
-        mesh, vert_fname = convert_ply_to_vtk(ply_fname)
+        mesh, vert_fname = convert_ply_to_vtk(ply_fname, save=True)
 
     # Setup your dataset with just one mesh
     sdf_dataset = SDFSamples(
@@ -359,7 +412,7 @@ for i, vert_fname in enumerate(mesh_list):
     # Load points from specified bounding box or randomly downsample mesh
     if partial_specimen:
         bbox = load_slicer_roi_bbox(bbox_list[i])
-        partial_pts = sample_points_in_bbox(vert_fname, bbox, n_points=200)
+        partial_pts = sample_points_in_bbox(vert_fname, bbox, n_points=1500)
     else:
         partial_pts = downsample_partial_pointcloud(vert_fname, 500)
     partial_pts = torch.tensor(partial_pts, dtype=torch.float32)
@@ -368,7 +421,10 @@ for i, vert_fname in enumerate(mesh_list):
 
     # Optimize latents
     print("Optimizing latents")
-    latent_partial, loss_log = optimize_latent_partial(model, partial_pts, config['latent_size'], mean_latent, latent_codes, top_k=top_k_reg, iters=5000, lr=1e-3, lambda_reg=1e-4, clamp_val=None)
+    # Phase 1 - Coarse Optimization - get a global shape in the right area of latent space (close to target specimen (far enough from mean); but not so far from mean that it is noisy or unrealistic)
+    latent_partial, loss_log = optimize_latent_partial(model, partial_pts, config['latent_size'], mean_latent=mean_latent, latent_init=latent_codes, top_k=top_k_reg, iters=3000, lr=1.5e-4, lambda_reg=7e-7, clamp_val=None)
+    # Phase 2 - Refinement - emphasis on local SDF samples and surface consistency to refine target specimen shape
+    latent_partial, loss_log = optimize_latent_partial(model, partial_pts, config['latent_size'], latent_init=latent_partial, iters=5000, lr=1.3e-5, lambda_reg=0.7e-4, clamp_val=None, multi_stage=True)
     print("Translated novel mesh into latent space!")
     
     # Reconstruction parameters
@@ -407,6 +463,8 @@ for i, vert_fname in enumerate(mesh_list):
         mesh_pv = mesh_out
 
     # Save mesh
+    mesh_pv = mesh_pv.clean()
+    mesh_pv = mesh_pv.triangulate()
     output_path = outfpath + "/" + os.path.splitext(os.path.basename(vert_fname))[0] + "_shape_completion.vtk"
     mesh_pv.save(output_path)
     print(f"Completed mesh from partial pointcloud saved to: {output_path}")
