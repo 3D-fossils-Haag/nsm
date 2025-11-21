@@ -31,7 +31,7 @@ def pv_to_o3d(mesh_pv):
     return mesh_o3d
 
 # Convert ply file to vtk
-def convert_ply_to_vtk(input_file, output_file=None):
+def convert_ply_to_vtk(input_file, output_file=None, save=False):
     if not input_file.lower().endswith('.ply'):
         raise ValueError("Input file must have a .ply extension.")
     if not os.path.exists(input_file):
@@ -39,9 +39,10 @@ def convert_ply_to_vtk(input_file, output_file=None):
     if output_file is None:
         output_file = os.path.splitext(input_file)[0] + ".vtk"
     mesh = pv.read(input_file)
-    mesh.save(output_file)
+    if save==True:
+        mesh.save(output_file)
     print(f"Converted {input_file} → {output_file}")
-    return output_file
+    return mesh, output_file
 
 # Load model config file
 def load_config(config_path='model_params_config.json'):
@@ -82,43 +83,6 @@ def load_model_and_latents(MODEL_PATH, LC_PATH, config, device):
     latent_ckpt = torch.load(LC_PATH, map_location=device)
     latent_codes = latent_ckpt['latent_codes']['weight'].detach().cpu()
     return model, latent_ckpt, latent_codes
-
-# Sample latent grid aross num_x and num_y values - Isomap
-def sample_latent_grid(latent_2d, num_x, num_y):
-    x_min, y_min = latent_2d.min(axis=0)
-    x_max, y_max = latent_2d.max(axis=0)
-    x_vals = np.linspace(x_min, x_max, num_x)
-    y_vals = np.linspace(y_min, y_max, num_y)
-    grid_x, grid_y = np.meshgrid(x_vals, y_vals)
-    grid_samples = np.column_stack([grid_x.ravel(), grid_y.ravel()])
-    return grid_samples
-
-# Solve travelling salesman nearest neghbor path - Isomap
-def solve_tsp_nearest_neighbor(dist_matrix):
-    N = dist_matrix.shape[0]
-    visited = np.zeros(N, dtype=bool)
-    path = [0]  # Start at point 0
-    visited[0] = True
-    for _ in range(1, N):
-        last = path[-1]
-        # Mask visited nodes
-        dists = dist_matrix[last]
-        dists[visited] = np.inf
-        next_idx = np.argmin(dists)
-        path.append(next_idx)
-        visited[next_idx] = True
-    return path
-
-# Interpolate latent path as loop - Isomap
-def interpolate_latent_loop(latents, steps_per_segment=10):
-    loop_latents = []
-    for i in range(len(latents) - 1):
-        start = latents[i]
-        end = latents[i + 1]
-        for t in np.linspace(0, 1, steps_per_segment, endpoint=False):
-            interp = (1 - t) * start + t * end
-            loop_latents.append(interp)
-    return np.array(loop_latents)
 
 # begin monkey patch
 def safe_load_mesh_scalars(self):
