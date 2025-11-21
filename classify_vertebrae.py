@@ -41,6 +41,8 @@ all_vtk_files = [os.path.basename(f) for f in train_paths]
 # Randomly select test paths
 mesh_list = random.sample(config['val_paths'], 100) # TO DO: Choose val or test paths
 
+# Define functions
+
 # Optimie latent vector for inference (since DeepSDF has no encoder, this is how you run novel data through for inference)
 def optimize_latent(decoder, points, sdf_vals, latent_size, iters=1000, lr=1e-3):
     init_latent_torch = pca_initialize_latent(mean_latent, latent_codes, top_k=top_k_reg) # initialize near mean using PCAs for regularization
@@ -79,7 +81,7 @@ for i, vert_fname in enumerate(mesh_list):
     # Convert plys to vtks
     if '.ply' in vert_fname:
         ply_fname = vert_fname
-        vert_fname = convert_ply_to_vtk(ply_fname)
+        _, vert_fname = convert_ply_to_vtk(ply_fname)
 
     # Setup your dataset with just one mesh
     sdf_dataset = SDFSamples(
