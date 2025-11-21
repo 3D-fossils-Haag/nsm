@@ -11,77 +11,24 @@ from sklearn.neighbors import NearestNeighbors
 from scipy.spatial.distance import cdist
 import re
 from scipy.signal import savgol_filter
+from NSM.helper_funcs import NumpyTransform, pv_to_o3d, load_config, load_model_and_latents, sample_latent_grid, solve_tsp_nearest_neighbor, interpolate_latent_loop
 
-# Define PC index and model checkpoint to use for video generation
-TRAIN_DIR = "run_v30" # TO DO: Choose training directory containing model ckpt and latent codes
+# Define model parameters to use for video generation
+TRAIN_DIR = "run_v41" # TO DO: Choose training directory containing model ckpt and latent codes
 os.chdir(TRAIN_DIR)
-CKPT = '3000' # TO DO: Choose the ckpt value you want to analyze results for
+CKPT = '1000' # TO DO: Choose the ckpt value you want to analyze results for
 LC_PATH = 'latent_codes' + '/' + CKPT + '.pth'
 MODEL_PATH = 'model' + '/' + CKPT + '.pth'
 USE_AVERAGES = True # TO DO: Use region averages or individual vertebrae?
 
-class NumpyTransform:
-    def __init__(self, matrix):
-        self.matrix = matrix
-    def GetMatrix(self):
-        vtk_mat = vtk.vtkMatrix4x4()
-        for i in range(4):
-            for j in range(4):
-                vtk_mat.SetElement(i, j, self.matrix[i, j])
-        return vtk_mat
-
-def pv_to_o3d(mesh_pv):
-    pts = np.asarray(mesh_pv.points)
-    faces = np.asarray(mesh_pv.faces)
-    tris = faces.reshape(-1,4)[:,1:4]
-    mesh_o3d = o3d.geometry.TriangleMesh()
-    mesh_o3d.vertices = o3d.utility.Vector3dVector(pts)
-    mesh_o3d.triangles = o3d.utility.Vector3iVector(tris)
-    mesh_o3d.compute_vertex_normals()
-    return mesh_o3d
-
-def sample_latent_grid(latent_2d, num_x, num_y):
-    x_min, y_min = latent_2d.min(axis=0)
-    x_max, y_max = latent_2d.max(axis=0)
-    x_vals = np.linspace(x_min, x_max, num_x)
-    y_vals = np.linspace(y_min, y_max, num_y)
-    grid_x, grid_y = np.meshgrid(x_vals, y_vals)
-    grid_samples = np.column_stack([grid_x.ravel(), grid_y.ravel()])
-    return grid_samples
-
-def solve_tsp_nearest_neighbor(dist_matrix):
-    N = dist_matrix.shape[0]
-    visited = np.zeros(N, dtype=bool)
-    path = [0]  # Start at point 0
-    visited[0] = True
-    for _ in range(1, N):
-        last = path[-1]
-        # Mask visited nodes
-        dists = dist_matrix[last]
-        dists[visited] = np.inf
-        next_idx = np.argmin(dists)
-        path.append(next_idx)
-        visited[next_idx] = True
-    return path
-
-def interpolate_latent_loop(latents, steps_per_segment=10):
-    loop_latents = []
-    for i in range(len(latents) - 1):
-        start = latents[i]
-        end = latents[i + 1]
-        for t in np.linspace(0, 1, steps_per_segment, endpoint=False):
-            interp = (1 - t) * start + t * end
-            loop_latents.append(interp)
-    return np.array(loop_latents)
-
+# Define functions
 def resample_by_cumulative_distance(latents, n_frames):
     diffs = np.linalg.norm(np.diff(latents, axis=0), axis=1)
     dists = np.concatenate([[0], np.cumsum(diffs)])
     dists /= dists[-1]  # Normalize to [0, 1]
     new_steps = np.linspace(0, 1, n_frames)
     new_latents = np.array([
-        np.interp(new_steps, dists, latents[:, i]) for i in range(latents.shape[1])
-    ]).T
+        np.interp(new_steps, dists, latents[:, i]) for i in range(latents.shape[1])]).T
     return new_latents
 
 def project_to_isomap(latents_query, latents_all, isomap_2d):
@@ -99,19 +46,15 @@ def plot_latent_paths(isomap_2d, sampled_points, vert_region, use_averages=False
     "loop": {
         "data": loop_2d,
         "color": "violet",
-        "title": "Latent Interpolation Path"
-    },
+        "title": "Latent Interpolation Path"},
     "tsp": {
         "data": tsp_2d,
         "color": "olivedrab",
-        "title": "TSP-Ordered Path"
-    },
+        "title": "TSP-Ordered Path"},
     "smooth": {
         "data": smooth_loop_2d,
         "color": "deepskyblue",
-        "title": "Smoothed TSP Path"
-    }
-    }
+        "title": "Smoothed TSP Path"}}
     # Create subplots
     fig, axs = plt.subplots(1, 3, figsize=(18, 6), sharex=True, sharey=True)
     for ax, (key, path_info) in zip(axs, path_dict.items()):
@@ -132,8 +75,7 @@ def plot_latent_paths(isomap_2d, sampled_points, vert_region, use_averages=False
         loc='center left',
         bbox_to_anchor=(1, 0.5),
         borderaxespad=0.0,
-        fontsize='small'
-    )
+        fontsize='small')
     # Title and save
     plt.suptitle("Latent Interpolation Paths in Isomap 2D", fontsize=16)
     plt.tight_layout(rect=[0, 0, 0.92, 0.95])
@@ -148,21 +90,13 @@ def plot_latent_paths(isomap_2d, sampled_points, vert_region, use_averages=False
     print(f"\033[92mSaved latent space path overlay to {figpath}\033[0m")
 
 # Load config
-config_path = 'model_params_config.json'
-try:
-    with open(config_path, 'r') as f:
-        config = json.load(f)
-    print(f"\033[92mLoaded config from {config_path}\033[0m")
-except FileNotFoundError:
-    raise FileNotFoundError(f"Error: model_params_config.json not found at {config_path}")
-
+config = load_config(config_path='model_params_config.json')
 device = config.get("device", "cuda:0")
 train_paths = config['list_mesh_paths']
 all_vtk_files = [os.path.basename(f) for f in train_paths]
 
-# Load latent codes
-latent_ckpt = torch.load(LC_PATH, map_location=device)
-latent_codes = latent_ckpt['latent_codes']['weight'].detach().cpu()
+# Load model and latent codes
+model, latent_ckpt, latent_codes = load_model_and_latents(MODEL_PATH, LC_PATH, config, device)
 
 # Define vertebral regions
 vertebral_regions = ['C', 'T', 'L']
@@ -226,33 +160,9 @@ latent_codes_tensor = torch.stack([torch.tensor(latent) for latent in latent_cod
 latent_codes_subs = latent_codes_tensor
 print(f"Running analysis for : {len(all_vtk_files_subs)} averaged latent codes for vertebral regions {vertebral_regions}.")
 
-# Set up model
-triplane_args = {
-    'latent_dim': config['latent_size'],
-    'n_objects': config['objects_per_decoder'],
-    'conv_hidden_dims': config['conv_hidden_dims'],
-    'conv_deep_image_size': config['conv_deep_image_size'],
-    'conv_norm': config['conv_norm'], 
-    'conv_norm_type': config['conv_norm_type'],
-    'conv_start_with_mlp': config['conv_start_with_mlp'],
-    'sdf_latent_size': config['sdf_latent_size'],
-    'sdf_hidden_dims': config['sdf_hidden_dims'],
-    'sdf_weight_norm': config['weight_norm'],
-    'sdf_final_activation': config['final_activation'],
-    'sdf_activation': config['activation'],
-    'sdf_dropout_prob': config['dropout_prob'],
-    'sum_sdf_features': config['sum_conv_output_features'],
-    'conv_pred_sdf': config['conv_pred_sdf'],
-}
-model = TriplanarDecoder(**triplane_args)
-model_ckpt = torch.load(MODEL_PATH, map_location=device)
-model.load_state_dict(model_ckpt['model'])
-model.to(device)
-model.eval()
-
 # Mesh creation params
 recon_grid_origin = 1.0
-n_pts_per_axis = 128
+n_pts_per_axis = 384
 voxel_origin = (-recon_grid_origin, -recon_grid_origin, -recon_grid_origin)
 voxel_size = (recon_grid_origin * 2) / (n_pts_per_axis - 1)
 offset = np.array([0.0, 0.0, 0.0])
@@ -331,7 +241,7 @@ if USE_AVERAGES == True:
     video_path = video_path + "_avg" + ".mp4"
 else:
     video_path = video_path + ".mp4"
-fps = 10
+fps = 15
 out_video = cv2.VideoWriter(video_path, cv2.VideoWriter_fourcc(*"mp4v"), fps, (width * 2, height * 2))
 
 generated_mesh_count = 0
@@ -383,7 +293,7 @@ for i, latent_code in enumerate(loop_sequence):
         ]
         ups = [
             [0, 0, 1],  # rotating
-            [0, 0, 1],  # front
+            [1, 0, 0],  # front
             [0, 0, 1],  # side
             [0, 1, 0],  # top-down
         ]

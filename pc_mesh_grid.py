@@ -7,20 +7,14 @@ import open3d as o3d
 import pyvista as pv
 import vtk # Required by NumpyTransform if used by create_mesh implicitly
 import gc
-
-# Assuming NSM.mesh and NSM.models are in PYTHONPATH or accessible
-try:
-    from NSM.mesh import create_mesh
-    from NSM.models import TriplanarDecoder
-except ImportError as e:
-    print(f"\033[31mCould not import NSM modules. Make sure NSM is in your PYTHONPATH: {e}\033[0m")
-    print("\033[31mPlease ensure the NSM package (containing mesh.py and models.py) is accessible.\033[0m")
-    exit()
+from NSM.mesh import create_mesh
+from NSM.models import TriplanarDecoder
+from NSM.helper_funcs import NumpyTransform, pv_to_o3d, load_config, load_model_and_latents
 
 # --- Configuration for the grid image ---
-TRAIN_DIR = "run_v30" # TO DO: Choose training directory containing model ckpt and latent codes
+TRAIN_DIR = "run_v41" # TO DO: Choose training directory containing model ckpt and latent codes
 os.chdir(TRAIN_DIR)
-CKPT = '3000' # TO DO: Choose the ckpt value you want to analyze results for
+CKPT = '1000' # TO DO: Choose the ckpt value you want to analyze results for
 LC_PATH = 'latent_codes' + '/' + CKPT + '.pth'
 MODEL_PATH = 'model' + '/' + CKPT + '.pth'
 NUM_STEPS_PC0 = 8
@@ -39,94 +33,14 @@ BASE_BACKGROUND_COLOR_RGB_LIST = [0.72, 0.89, 0.78]  # Pale Seafoam
 MAX_TINT_BACKGROUND_COLOR_RGB_LIST = [0.03, 0.11, 0.08] # Dark Seafoam for sparse areas
 # --- End Configuration ---
 
-# For transforming and aligning meshes with ICP downstream
-class NumpyTransform:
-    def __init__(self, m):
-        self.m = m
-
-    def GetMatrix(self):
-        M = vtk.vtkMatrix4x4()
-        for i in range(4):
-            for j in range(4):
-                M.SetElement(i, j, self.m[i, j])
-        return M
-
-# Convert pyvista object to open3d for rendering views in grid
-def pv_to_o3d(pv_m):
-    if pv_m is None or pv_m.points is None:
-        return None
-    pts = np.asarray(pv_m.points)
-    if pv_m.faces is None or pv_m.n_faces_strict == 0:
-        m = o3d.geometry.TriangleMesh()
-        m.vertices = o3d.utility.Vector3dVector(pts)
-        return m
-    F = np.asarray(pv_m.faces)
-    try:
-        tris = F.reshape(-1, 4)[:, 1:4]
-    except ValueError:
-        temp_pv_mesh = pv.PolyData(pts, faces=F)
-        if not temp_pv_mesh.is_all_triangles:
-             temp_pv_mesh.triangulate(inplace=True)
-        F_tri = np.asarray(temp_pv_mesh.faces)
-        tris = F_tri.reshape(-1,4)[:,1:4]
-
-    m = o3d.geometry.TriangleMesh()
-    m.vertices = o3d.utility.Vector3dVector(pts)
-    m.triangles = o3d.utility.Vector3iVector(tris)
-    m.compute_vertex_normals()
-    m.paint_uniform_color([0.7, 0.7, 0.7])
-    return m
-
 # Plot the grid
 def main():
     # Load config
-    config_path = 'model_params_config.json'
-    try:
-        with open(config_path, 'r') as f:
-            cfg = json.load(f)
-        print(f"\033[92mLoaded config from {config_path}\033[0m")
-    except FileNotFoundError:
-        print(f"\033[31mError: model_params_config.json not found in {config_path}. Exiting.\033[0m")
+    config = load_config(config_path='model_params_config.json')
+    dev = config.get("device", "cuda:0")
 
-    dev = cfg.get('device', 'cuda:0')
-    if not torch.cuda.is_available() and dev.startswith('cuda'):
-        print("CUDA device requested but not available. Switching to CPU.")
-        dev = 'cpu'
-    # Load trained model and latent code from last checkpoint
-    try:
-        lc = torch.load(LC_PATH, map_location=dev) 
-        ck2 = torch.load(MODEL_PATH, map_location=dev)
-    except FileNotFoundError as e:
-        print(f"\033[31mError loading model/latent code files: {e}\033[0m")
-        print(f"\033[31mMake sure {LC_PATH} and {MODEL_PATH} exist in the current directory.\033[0m")
-        return
-
-    # Get the latent codes
-    L = lc['latent_codes']['weight'].detach().cpu().numpy()
-
-    required_keys = ['latent_size','objects_per_decoder','conv_hidden_dims','conv_deep_image_size','conv_norm','conv_norm_type','conv_start_with_mlp','sdf_latent_size','sdf_hidden_dims','weight_norm','final_activation','activation','dropout_prob','sum_conv_output_features','conv_pred_sdf']
-    missing_keys = [k for k in required_keys if k not in cfg]
-    if missing_keys:
-        print(f"\033[31mError: Config file is missing required keys for model arguments: {missing_keys}\033[0m")
-        return
-
-    # Prepare trained model for inference using define params from config file
-    args = {k: cfg[k] for k in required_keys}
-    triplane_args = {
-        'latent_dim': args['latent_size'], 'n_objects': args['objects_per_decoder'],
-        'conv_hidden_dims': args['conv_hidden_dims'], 'conv_deep_image_size': args['conv_deep_image_size'],
-        'conv_norm': args['conv_norm'], 'conv_norm_type': args['conv_norm_type'],
-        'conv_start_with_mlp': args['conv_start_with_mlp'],
-        'sdf_latent_size': args['sdf_latent_size'], 'sdf_hidden_dims': args['sdf_hidden_dims'],
-        'sdf_weight_norm': args['weight_norm'], 'sdf_final_activation': args['final_activation'],
-        'sdf_activation': args['activation'], 'sdf_dropout_prob': args['dropout_prob'],
-        'sum_sdf_features': args['sum_conv_output_features'],
-        'conv_pred_sdf': args['conv_pred_sdf']
-    }
-    mdl = TriplanarDecoder(**triplane_args)
-    mdl.load_state_dict(ck2['model'])
-    mdl.to(dev)
-    mdl.eval()
+    # Load model and latent codes
+    mdl, ck2, L = load_model_and_latents(MODEL_PATH, LC_PATH, config, dev)
 
     # Set centroids
     origin_val = 1.0 # TO DO: Adjust to fine tune sampled regions of shape for SDF calc (was 1.0)
@@ -138,6 +52,7 @@ def main():
     objs = 1
 
     # Run PCA of embeddings
+    L = L.numpy()
     mu = L.mean(0) # Get the mean shape vectors
     C = L - mu # Center the mean shape vectors
     U, S_val, Vt = np.linalg.svd(C, full_matrices=False) # Do singular value decomposition (SVD) to get principal components

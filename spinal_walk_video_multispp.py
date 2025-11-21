@@ -1,3 +1,5 @@
+# Make a video walking down the spine of 4 species
+
 import os, json, torch, numpy as np, cv2, open3d as o3d, pyvista as pv, vtk, gc
 from NSM.mesh import create_mesh
 from NSM.models import TriplanarDecoder
@@ -11,11 +13,12 @@ from sklearn.neighbors import NearestNeighbors
 from scipy.spatial.distance import cdist
 import re
 from scipy.signal import savgol_filter
+from NSM.helper_funcs import NumpyTransform, pv_to_o3d, load_config, load_model_and_latents
 
 # Define PC index and model checkpoint to use for video generation
-TRAIN_DIR = "run_v30" # TO DO: Choose training directory containing model ckpt and latent codes
+TRAIN_DIR = "run_v41" # TO DO: Choose training directory containing model ckpt and latent codes
 os.chdir(TRAIN_DIR)
-CKPT = '3000' # TO DO: Choose the ckpt value you want to analyze results for
+CKPT = '1000' # TO DO: Choose the ckpt value you want to analyze results for
 LC_PATH = 'latent_codes' + '/' + CKPT + '.pth'
 MODEL_PATH = 'model' + '/' + CKPT + '.pth'
 
@@ -29,25 +32,7 @@ incl_spec = True # TO DO: Include species label or only to genus level?
 # Number of total vertebrae to generate along the spine
 n_vertebrae = 50 # TO DO: Adjust this number
 
-class NumpyTransform:
-    def __init__(self, matrix):
-        self.matrix = matrix
-    def GetMatrix(self):
-        vtk_mat = vtk.vtkMatrix4x4()
-        for i in range(4):
-            for j in range(4):
-                vtk_mat.SetElement(i, j, self.matrix[i, j])
-        return vtk_mat
-
-def pv_to_o3d(mesh_pv):
-    pts = np.asarray(mesh_pv.points)
-    faces = np.asarray(mesh_pv.faces)
-    tris = faces.reshape(-1,4)[:,1:4]
-    mesh_o3d = o3d.geometry.TriangleMesh()
-    mesh_o3d.vertices = o3d.utility.Vector3dVector(pts)
-    mesh_o3d.triangles = o3d.utility.Vector3iVector(tris)
-    mesh_o3d.compute_vertex_normals()
-    return mesh_o3d
+# Define functions
 
 # Sort the files by vertebrae label (C1, C2, ..., L40)
 def sort_by_numerical_prefix_and_vertebra(file_label):
@@ -148,8 +133,7 @@ legend_items = [
     ('d', 'Arboreal'),
     ('X', 'Terrestrial'),
     ('o', 'Saxicolous'),
-    ('2', 'Snake')
-]
+    ('2', 'Snake')]
 
 # Get the corresponding label for the marker
 def get_life_history_label(marker):
@@ -159,21 +143,13 @@ def get_life_history_label(marker):
     return None 
 
 # Load config
-config_path = 'model_params_config.json'
-try:
-    with open(config_path, 'r') as f:
-        config = json.load(f)
-    print(f"\033[92mLoaded config from {config_path}\033[0m")
-except FileNotFoundError:
-    raise FileNotFoundError(f"Error: model_params_config.json not found at {config_path}")
-
+config = load_config(config_path='model_params_config.json')
 device = config.get("device", "cuda:0")
 train_paths = config['list_mesh_paths']
 all_vtk_files = [os.path.basename(f) for f in train_paths]
 
-# Load latent codes
-latent_ckpt = torch.load(LC_PATH, map_location=device)
-latent_codes = latent_ckpt['latent_codes']['weight'].detach().cpu()
+# Load model and latent codes
+model, latent_ckpt, latent_codes = load_model_and_latents(MODEL_PATH, LC_PATH, config, device)
 
 # Define vertebral regions
 vertebral_regions = ['C', 'T', 'L']
@@ -201,7 +177,6 @@ for vert_region in vertebral_regions:
 latent_codes_tensor = torch.stack([torch.tensor(latent) for latent in latent_codes_subs])
 latent_codes_subs = latent_codes_tensor
 print(f"Found: {len(all_vtk_files_subs)} latent codes for vertebral regions: {vertebral_regions}.")
-
 
 # Filter latent codes and file paths that match the species
 species_latents_dict = {}
@@ -232,30 +207,6 @@ for i in range(len(interpolated_latents)):
 
 # Now, you have interpolated_latentsand their corresponding filenames
 print(f"Generated {len(interpolated_latents)} vertebrae latent codes.")
-
-# Set up model
-triplane_args = {
-    'latent_dim': config['latent_size'],
-    'n_objects': config['objects_per_decoder'],
-    'conv_hidden_dims': config['conv_hidden_dims'],
-    'conv_deep_image_size': config['conv_deep_image_size'],
-    'conv_norm': config['conv_norm'], 
-    'conv_norm_type': config['conv_norm_type'],
-    'conv_start_with_mlp': config['conv_start_with_mlp'],
-    'sdf_latent_size': config['sdf_latent_size'],
-    'sdf_hidden_dims': config['sdf_hidden_dims'],
-    'sdf_weight_norm': config['weight_norm'],
-    'sdf_final_activation': config['final_activation'],
-    'sdf_activation': config['activation'],
-    'sdf_dropout_prob': config['dropout_prob'],
-    'sum_sdf_features': config['sum_conv_output_features'],
-    'conv_pred_sdf': config['conv_pred_sdf'],
-}
-model = TriplanarDecoder(**triplane_args)
-model_ckpt = torch.load(MODEL_PATH, map_location=device)
-model.load_state_dict(model_ckpt['model'])
-model.to(device)
-model.eval()
 
 # Mesh creation params
 recon_grid_origin = 1.0

@@ -1,60 +1,37 @@
+# Make a 4-way split video exploring shape along PC axis
+
 import os, json, torch, numpy as np, cv2, open3d as o3d, pyvista as pv, vtk, gc
 from NSM.mesh import create_mesh
 from NSM.models import TriplanarDecoder
 import matplotlib.pyplot as plt
 import io
 from PIL import Image
+from NSM.helper_funcs import NumpyTransform, pv_to_o3d, load_config, load_model_and_latents
 
 # Define PC index and model checkpoint to use for video generation
-TRAIN_DIR = "run_v30" # TO DO: Choose training directory containing model ckpt and latent codes
+TRAIN_DIR = "run_v41" # TO DO: Choose training directory containing model ckpt and latent codes
 os.chdir(TRAIN_DIR)
 PC_idx = 0   # TO DO: Choose PC index for PC of interest (ex: For PC1, choose 0)
-CKPT = '3000' # TO DO: Choose the ckpt value you want to analyze results for
+CKPT = '1000' # TO DO: Choose the ckpt value you want to analyze results for
 LC_PATH = 'latent_codes' + '/' + CKPT + '.pth'
 MODEL_PATH = 'model' + '/' + CKPT + '.pth'
 
-class NumpyTransform:
-    def __init__(self, matrix):
-        self.matrix = matrix
-    def GetMatrix(self):
-        vtk_mat = vtk.vtkMatrix4x4()
-        for i in range(4):
-            for j in range(4):
-                vtk_mat.SetElement(i, j, self.matrix[i, j])
-        return vtk_mat
-
-def pv_to_o3d(mesh_pv):
-    pts = np.asarray(mesh_pv.points)
-    faces = np.asarray(mesh_pv.faces)
-    tris = faces.reshape(-1,4)[:,1:4]
-    mesh_o3d = o3d.geometry.TriangleMesh()
-    mesh_o3d.vertices = o3d.utility.Vector3dVector(pts)
-    mesh_o3d.triangles = o3d.utility.Vector3iVector(tris)
-    mesh_o3d.compute_vertex_normals()
-    return mesh_o3d
-
+# Define functions
 def generate_latent_path_plot(projections, proj_val, min_proj, max_proj, width=200, height=80):
     print(f"projections shape: {projections.shape}")
     print(f"proj_val: {proj_val}")
-
     # Ensure projections is a 1D array
     projections = projections.flatten()
-
     # Plot latent points
     fig, ax = plt.subplots(figsize=(width / 100, height / 100), dpi=200)
-
     # Set the background color to black
     fig.patch.set_facecolor('black')  # Black background for the figure
     ax.set_facecolor('black')  # Black background for the axes
-
     # Plot latent points
-    #ax.scatter(projections, np.zeros_like(projections), color='paleturquoise', alpha=0.3, s=4)
     ax.set_xlim(min_proj, max_proj)
     ax.plot([min_proj, max_proj], [0, 0], color='paleturquoise', alpha=0.2, linewidth=1)
-
     # Plot the current latent point (use proj_val directly and ensure it's scalar)
     ax.scatter(proj_val, 0, color='deeppink', s=10)
-
     # Customize the plot
     ax.set_yticks([])  # Hide y-axis ticks
     ax.set_xticks([0])
@@ -63,10 +40,8 @@ def generate_latent_path_plot(projections, proj_val, min_proj, max_proj, width=2
     ax.legend().set_visible(False)
     for spine in ax.spines.values():
         spine.set_visible(False)
-
     ax.set_title(f"Latent Path (PC{str((PC_idx+1))})", fontsize=10, color='white')
     plt.tight_layout()
-
     buf = io.BytesIO()
     plt.savefig(buf, format='png', transparent=False)
     plt.close(fig)
@@ -76,46 +51,17 @@ def generate_latent_path_plot(projections, proj_val, min_proj, max_proj, width=2
     return img_np
 
 # Load config
-config_path = 'model_params_config.json'
-try:
-    with open(config_path, 'r') as f:
-        config = json.load(f)
-    print(f"\033[92mLoaded config from {config_path}\033[0m")
-except FileNotFoundError:
-    raise FileNotFoundError(f"Error: model_params_config.json not found at {config_path}")
-
+config = load_config(config_path='model_params_config.json')
 device = config.get("device", "cuda:0")
 train_paths = config['list_mesh_paths']
 all_vtk_files = [os.path.basename(f) for f in train_paths]
 
-latent_ckpt = torch.load(LC_PATH, map_location=device)
-latent_codes = latent_ckpt['latent_codes']['weight'].detach().cpu()
-triplane_args = {
-    'latent_dim': config['latent_size'],
-    'n_objects': config['objects_per_decoder'],
-    'conv_hidden_dims': config['conv_hidden_dims'],
-    'conv_deep_image_size': config['conv_deep_image_size'],
-    'conv_norm': config['conv_norm'], 
-    'conv_norm_type': config['conv_norm_type'],
-    'conv_start_with_mlp': config['conv_start_with_mlp'],
-    'sdf_latent_size': config['sdf_latent_size'],
-    'sdf_hidden_dims': config['sdf_hidden_dims'],
-    'sdf_weight_norm': config['weight_norm'],
-    'sdf_final_activation': config['final_activation'],
-    'sdf_activation': config['activation'],
-    'sdf_dropout_prob': config['dropout_prob'],
-    'sum_sdf_features': config['sum_conv_output_features'],
-    'conv_pred_sdf': config['conv_pred_sdf'],
-}
-model = TriplanarDecoder(**triplane_args)
-model_ckpt = torch.load(MODEL_PATH, map_location=device)
-model.load_state_dict(model_ckpt['model'])
-model.to(device)
-model.eval()
+# Load model and latent codes
+model, latent_ckpt, latent_codes = load_model_and_latents(MODEL_PATH, LC_PATH, config, device)
 
 # Mesh creation params
 recon_grid_origin = 1.0
-n_pts_per_axis = 128
+n_pts_per_axis = 384
 voxel_origin = (-recon_grid_origin, -recon_grid_origin, -recon_grid_origin)
 voxel_size = (recon_grid_origin * 2) / (n_pts_per_axis - 1)
 offset = np.array([0.0, 0.0, 0.0])
@@ -142,14 +88,13 @@ low_delta = min_proj - center_proj
 # Alpha path
 n_rotations = 3
 amplify = 1.5
-n_seg = 30 * n_rotations
+n_seg = 15 * n_rotations
 alpha_vals = np.concatenate([
     np.linspace(+low_delta, 0, n_seg),
     np.linspace(0, +high_delta, n_seg),
     np.linspace(+high_delta, 0, n_seg),
     np.linspace(0, +low_delta, n_seg)
 ])
-
 total_frames = len(alpha_vals)
 
 # Setup Offscreen Renderers (4)
@@ -157,16 +102,16 @@ width, height = 640, 480
 renderers = [o3d.visualization.rendering.OffscreenRenderer(width, height) for _ in range(4)]
 for r in renderers:
     r.scene.set_background([0.0, 0.0, 0.0, 1.0])
-
 material = o3d.visualization.rendering.MaterialRecord()
 material.shader = "defaultLit"
 material.base_color = [1.0, 1.0, 1.0, 1.0]
 
 # Video Writer (2x2 grid → 1280x960)
-video_path = f"pc{PC_idx+1}_4way_{amplify}xpc.mp4"
+video_path = f"pc{PC_idx+1}_4way_{n_pts_per_axis}p_{amplify}xpc.mp4"
 fps = 15
 out_video = cv2.VideoWriter(video_path, cv2.VideoWriter_fourcc(*"mp4v"), fps, (width * 2, height * 2))
 
+# Loop through PC sweeps
 for i, alpha in enumerate(alpha_vals):
     try:
         new_latent_np = center_sample + amplify * alpha * pc1
