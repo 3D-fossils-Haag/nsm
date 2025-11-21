@@ -20,130 +20,32 @@ import vtk
 import re
 import random
 import open3d as o3d
+from NSM.helper_funcs import NumpyTransform, load_config, load_model_and_latents, convert_ply_to_vtk, get_sdfs, fixed_point_coords, safe_load_mesh_scalars 
+from NSM.optimization import pca_initialize_latent, get_top_k_pcs
+# Monkey Patch into pymskt.mesh.meshes.Mesh
+meshes.Mesh.load_mesh_scalars = safe_load_mesh_scalars
+meshes.Mesh.point_coords = property(fixed_point_coords)
 
 # Define training directory
-TRAIN_DIR = "run_v33" # TO DO: Choose training directory containing model ckpt and latent codes
+TRAIN_DIR = "run_v41" # TO DO: Choose training directory containing model ckpt and latent codes
 os.chdir(TRAIN_DIR)
-CKPT = '3000' # TO DO: Choose the ckpt value you want to analyze results for
+CKPT = '1000' # TO DO: Choose the ckpt value you want to analyze results for
 LC_PATH = 'latent_codes' + '/' + CKPT + '.pth'
 MODEL_PATH = 'model' + '/' + CKPT + '.pth'
-partial_specimen = True  # TO DO: indicate if specimen(s) is/are partial
+partial_specimen = False  # TO DO: indicate if specimen(s) is/are partial
 
 # Load model config
-config_path = 'model_params_config.json'
-with open(config_path, 'r') as f:
-    config = json.load(f)
+config = load_config(config_path='model_params_config.json')
 device = config.get("device", "cuda:0")
 
 # Select paths to meshes for shape completion
-#mesh_list = random.sample(config['test_paths'], 100)
-mesh_list = random.sample(config['val_paths'], 5) # TO DO: Choose val or test paths
-partial_specimen = True  # TO DO: indicate if specimen is partial
+mesh_dir = "path/to/your/shape_completion/partial_meshes" # TO: Update path to your partial meshes made with create_partial_meshes.py
+mesh_list = random.sample([os.path.join(mesh_dir, name) for name in os.listdir(mesh_dir)], 20) # TO DO: Update how many to randomly sample
+
 # Select corresponding bounding boxes with intact regions of specimens outlined (filenames should match meshes, but with .mrk.json extension)
 bbox_list = [os.path.splitext(mesh_item)[0] + ".mrk.json" for mesh_item in mesh_list] # TO DO: Enter paths here
 
-# monkey patch for mesh handling with pymskt
-def safe_load_mesh_scalars(self):
-    try:
-        # Try PyVista mesh first
-        if hasattr(self, 'mesh'):
-            mesh = self.mesh
-        elif hasattr(self, '_mesh'):
-            mesh = self._mesh
-        else:
-            raise AttributeError("No mesh attribute found in Mesh object.")
-        point_scalars = mesh.point_data
-        cell_scalars = mesh.cell_data
-        if point_scalars and len(point_scalars.keys()) > 0:
-            self.mesh_scalar_names = list(point_scalars.keys())
-            self.scalar_name = self.mesh_scalar_names[0]
-        elif cell_scalars and len(cell_scalars.keys()) > 0:
-            self.mesh_scalar_names = list(cell_scalars.keys())
-            self.scalar_name = self.mesh_scalar_names[0]
-        else:
-            self.mesh_scalar_names = []
-            self.scalar_name = None
-            print("No scalar data found in mesh. Proceeding without scalars.")
-    except Exception as e:
-        print(f"Failed to load mesh scalars: {e}")
-        self.mesh_scalar_names = []
-        self.scalar_name = None
-meshes.Mesh.load_mesh_scalars = safe_load_mesh_scalars
-
-def fixed_point_coords(self):
-    if self.n_points < 1:
-        raise AttributeError(f"No points found in mesh '{self}'")
-    return self.points
-meshes.Mesh.point_coords = property(fixed_point_coords)
-
-def get_sdfs(decoder, samples, latent_vector, batch_size=32**3, objects=1, device=device):
-    n_pts_total = samples.shape[0]
-    current_idx = 0
-    sdf_values = torch.zeros(samples.shape[0], objects, device=device) # KW patch from device mismatch
-    if batch_size > n_pts_total:
-        print('WARNING: batch_size is greater than the number of samples, setting batch_size to the number of samples')
-        batch_size = n_pts_total
-    while current_idx < n_pts_total:
-        current_batch_size = min(batch_size, n_pts_total - current_idx)
-        sampled_pts = samples[current_idx : current_idx + current_batch_size, :3].to(device)
-        sdf_values[current_idx : current_idx + current_batch_size, :] = decode_sdf(
-                decoder, latent_vector, sampled_pts) # removed .detach().cpu() bc of device mismatch
-        current_idx += current_batch_size
-        print(f"Processed {current_idx} / {n_pts_total} points")
-    return sdf_values
-
-def decode_sdf(decoder, latent_vector, queries):
-    num_samples = queries.shape[0]
-    if latent_vector is None:
-        inputs = queries
-    else:
-        latent_repeat = latent_vector.expand(num_samples, -1)
-        inputs = torch.cat([latent_repeat, queries], dim=1)
-    # Make sure inputs are going to the same device as everyone else
-    inputs = inputs.to(next(decoder.parameters()).device)  
-    return decoder(inputs)
-
-#### end monkey patch
-
-# Initialize latent near PCA offset mean
-def pca_initialize_latent(mean_latent, latent_codes, top_k=10):
-    # Convert to numpy
-    latent_np = latent_codes.detach().cpu().numpy()
-    mean_np = mean_latent.detach().cpu().numpy().squeeze()
-    pca = PCA(n_components=latent_np.shape[1])
-    pca.fit(latent_np)
-    # Sample along top-K PCs
-    top_components = pca.components_[:top_k]  # (K, D)
-    top_eigenvalues = pca.explained_variance_[:top_k]
-    scale = 0.01  # tune this
-    coeffs = np.random.randn(top_k) * np.sqrt(top_eigenvalues) * scale
-    pca_offset = np.dot(coeffs, top_components)  # D
-    init_latent = mean_np + pca_offset
-    return torch.tensor(init_latent, dtype=torch.float32, device=latent_codes.device).unsqueeze(0)
-
-# Get top k PCA's based on defined explained variance threshold
-def get_top_k_pcs(latent_codes, threshold=0.90):
-    latent_np = latent_codes.cpu().numpy()
-    pca = PCA()
-    pca.fit(latent_np)
-    cum_var = np.cumsum(pca.explained_variance_ratio_)
-    k = np.searchsorted(cum_var, threshold)
-    print(f"Selected top {k+1} PCs to explain {threshold*100:.1f}% of variance")
-    return pca, k + 1
-
-# Convert ply file to vtk
-def convert_ply_to_vtk(input_file, output_file=None, save=False):
-    if not input_file.lower().endswith('.ply'):
-        raise ValueError("Input file must have a .ply extension.")
-    if not os.path.exists(input_file):
-        raise FileNotFoundError(f"Input file does not exist: {input_file}")
-    if output_file is None:
-        output_file = os.path.splitext(input_file)[0] + ".vtk"
-    mesh = pv.read(input_file)
-    if save:
-        mesh.save(output_file)
-    print(f"Converted {input_file} → {output_file}")
-    return mesh, output_file
+# Define functions
 
 # Optimize latent from partial pointcloud (model has no encoder, so need to optimize before feeding in new data)
 def optimize_latent_partial(decoder, partial_pts, latent_dim, mean_latent=None, latent_init=None, iters=2000, 
@@ -327,46 +229,10 @@ def sample_near_surface(surface_pts, eps=0.005, fraction_nonzero=0.3,
     sdf = torch.cat([sdf_zero, sdf_nonzero, sdf_far], dim=0)
     return pts, sdf
 
-# Utility class for ICP transform
-class NumpyTransform:
-    def __init__(self, matrix):
-        self.matrix = matrix
-    def GetMatrix(self):
-        vtk_mat = vtk.vtkMatrix4x4()
-        for i in range(4):
-            for j in range(4):
-                vtk_mat.SetElement(i, j, self.matrix[i, j])
-        return vtk_mat
-
-# Load model and latents
-print("Loading model and latents")
-latent_ckpt = torch.load(LC_PATH, map_location=device)
-latent_codes = latent_ckpt['latent_codes']['weight'].detach().to(device)
+# Load model and latent codes
+model, latent_ckpt, latent_codes = load_model_and_latents(MODEL_PATH, LC_PATH, config, device)
 mean_latent = latent_codes.mean(dim=0, keepdim=True)
 _, top_k_reg = get_top_k_pcs(latent_codes, threshold=0.95)
-
-triplane_args = {
-    'latent_dim': config['latent_size'],
-    'n_objects': config['objects_per_decoder'],
-    'conv_hidden_dims': config['conv_hidden_dims'],
-    'conv_deep_image_size': config['conv_deep_image_size'],
-    'conv_norm': config['conv_norm'], 
-    'conv_norm_type': config['conv_norm_type'],
-    'conv_start_with_mlp': config['conv_start_with_mlp'],
-    'sdf_latent_size': config['sdf_latent_size'],
-    'sdf_hidden_dims': config['sdf_hidden_dims'],
-    'sdf_weight_norm': config['weight_norm'],
-    'sdf_final_activation': config['final_activation'],
-    'sdf_activation': config['activation'],
-    'sdf_dropout_prob': config['dropout_prob'],
-    'sum_sdf_features': config['sum_conv_output_features'],
-    'conv_pred_sdf': config['conv_pred_sdf'],
-}
-model = TriplanarDecoder(**triplane_args)
-model_ckpt = torch.load(MODEL_PATH, map_location=device)
-model.load_state_dict(model_ckpt['model'])
-model.to(device)
-model.eval()
 
 # Loop through meshes
 summary_log = []
@@ -412,9 +278,9 @@ for i, vert_fname in enumerate(mesh_list):
     # Load points from specified bounding box or randomly downsample mesh
     if partial_specimen:
         bbox = load_slicer_roi_bbox(bbox_list[i])
-        partial_pts = sample_points_in_bbox(vert_fname, bbox, n_points=1500)
+        partial_pts = sample_points_in_bbox(vert_fname, bbox, n_points=1200)
     else:
-        partial_pts = downsample_partial_pointcloud(vert_fname, 500)
+        partial_pts = downsample_partial_pointcloud(vert_fname, 1200)
     partial_pts = torch.tensor(partial_pts, dtype=torch.float32)
     partial_cloud = pv.PolyData(partial_pts.cpu().numpy())
     partial_cloud.save(outfpath + "/" + os.path.splitext(os.path.basename(vert_fname))[0] + "_partial_input.vtk")
