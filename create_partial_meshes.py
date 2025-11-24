@@ -104,7 +104,7 @@ def create_validation_dataset(original_dir, segments_dir, output_dir, segment_to
         'segments_dir': os.path.abspath(segments_dir),
         'meshes': results
     }
-    summary_path = os.path.join(output_dir, "validation_summary.json")
+    summary_path = os.path.join(output_dir, "partial_meshing_summary.json")
     with open(summary_path, 'w') as f:
         json.dump(summary, f, indent=2)
     print(f"\n{'='*70}")
