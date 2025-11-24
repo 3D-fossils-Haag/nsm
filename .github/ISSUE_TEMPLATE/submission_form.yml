@@ -1,0 +1,66 @@
+name: "Bug Report"
+description: File a bug report
+title: "[Bug]: "
+labels: ["bug", "triage"]
+body:
+  - type: markdown
+    attributes:
+      value: | 
+        Thanks for taking the time to fill out this bug report!
+  - type: input
+    id: contact
+    attributes:
+      label: Contact Details
+      description: How can we get in touch with you if we need more info?
+      placeholder: Ex. email@example.com
+    validations:
+      required: false
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened?
+      description: Also tell us, what did you expect to happen?
+      placeholder: Tell us what you see!
+      value: "A bug happened!"
+    validations:
+      required: true
+  - type: textarea
+    id: i-tried
+    attributes:
+      label: How did you try to fix it?
+      description: Any specific functions, trying previous versions, etc.
+    validations:
+      required: true
+  - type: textarea
+    id: filename
+    attributes:
+      label: Filename
+      description: What is the filename of the script that you would like to see improved?
+      placeholder: Type your filename here
+      value: "Ex. classify_vertebrae.py"
+    validations:
+      required: true
+  - type: textarea
+    id: versions
+    attributes:
+      label: Version
+      description: What version of python, pytorch, and pytorch-cuda are you running?
+      placeholder: To get verisons, type in terminal -> conda activate NSM && conda list | grep "python\|pytorch"
+      value: "Ex. python 3.11.13  pytorch 2.5.1  pytorch-cuda 12.4"
+    validations:
+      required: true
+  - type: dropdown
+    id: OS
+    attributes:
+      label: What OS are you using?
+      multiple: true
+      options:
+        - MacOS
+        - Ubuntu/Linux
+        - Windows
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant log output
+      description: Please copy and paste any relevant log output. This will be automatically formatted into code, so no need for backticks.
+      render: shell
