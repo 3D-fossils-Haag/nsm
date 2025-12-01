@@ -30,12 +30,12 @@ meshes.Mesh.load_mesh_scalars = safe_load_mesh_scalars
 meshes.Mesh.point_coords = property(fixed_point_coords)
 
 # Define training directory
-TRAIN_DIR = "run_v41" # TO DO: Choose training directory containing model ckpt and latent codes
+TRAIN_DIR = "run_v44" # TO DO: Choose training directory containing model ckpt and latent codes
 os.chdir(TRAIN_DIR)
-CKPT = '1000' # TO DO: Choose the ckpt value you want to analyze results for
+CKPT = '2000' # TO DO: Choose the ckpt value you want to analyze results for
 LC_PATH = 'latent_codes' + '/' + CKPT + '.pth'
 MODEL_PATH = 'model' + '/' + CKPT + '.pth'
-val_sum_path = "shape_completion/partial_meshes/partial_meshes" # TO DO: Choose path to save validation_summary.json
+val_sum_path = "shape_completion/meshes/partial_meshes" # TO DO: Choose path to save validation_summary.json
 val_sum_fn = val_sum_path + "/partial_meshing_summary.json"
 
 # Load model config
@@ -123,22 +123,28 @@ def run_trial(partial_mesh_path, gt_path, cfg, out_dir, model, mean_latent, late
     return cd, pred_path
 
 # 4) Random search on a small validation subset to pick best cfg
-def random_search(pairs, model, mean_latent, latent_codes, device, out_dir, n_trials=10, valN=15, log_path_csv=None, log_path_json=None):
+def random_search(pairs, model, mean_latent, latent_codes, device, out_dir, n_trials=15, valN=30, log_path_csv=None, log_path_json=None):
     # Set up directory for fine-tuning experiemnts
     os.makedirs(out_dir, exist_ok=True)
     subset = pairs[:valN]
     best = {'score': float('inf'), 'cfg': None}
     rows = []
+    # Define how many PCs describe X% of variance
+    _, k95 = get_top_k_pcs(latent_codes, threshold=0.95)
+    _, k90 = get_top_k_pcs(latent_codes, threshold=0.90)
+    _, k99 = get_top_k_pcs(latent_codes, threshold=0.99)
+
     # Randomly pick optimization parameters from provided values
     for t in range(n_trials):
+
         cfg = {
-            'top_k': random.choice([8, 12, 16, 24]),
+            'top_k': random.choice([k95, k90, k99]),
             'iters1': random.choice([1500, 2500, 3000]),
-            'iters2': random.choice([3000, 5000]),
-            'lr1': random.choice([1.0e-4, 1.5e-4, 2.0e-4]),
-            'lr2': random.choice([7.5e-6, 1.0e-5, 1.5e-5]),
-            'lambda1': random.choice([5e-7, 1e-6, 5e-6]),
-            'lambda2': random.choice([5e-7, 1e-6, 5e-6]),
+            'iters2': random.choice([5000, 8000, 10000]),
+            'lr1': random.choice([1.0e-3, 5e-3, 1.0e-4]),
+            'lr2': random.choice([1e-4, 5.0e-5, 3e-4]),
+            'lambda1': random.choice([5e-6, 1e-6, 5e-5]),
+            'lambda2': random.choice([5e-5, 1e-4, 5e-4]),
             'clamp': random.choice([None, 0.5, 1.0]),
             'sched_step': random.choice([800, 1000]),
             'sched_gamma': random.choice([0.5, 0.7]),
@@ -296,7 +302,6 @@ def sample_near_surface(surface_pts, eps=0.005, fraction_nonzero=0.3,
 # Load model and latent codes
 model, latent_ckpt, latent_codes = load_model_and_latents(MODEL_PATH, LC_PATH, config, device)
 mean_latent = latent_codes.mean(dim=0, keepdim=True)
-_, top_k_reg = get_top_k_pcs(latent_codes, threshold=0.95)
 
 # Find the best hyperparameters using random search
 best_cfg, trial_rows = random_search(pairs, model, mean_latent, latent_codes, device,
