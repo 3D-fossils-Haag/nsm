@@ -89,6 +89,7 @@ def create_mesh(
     verbose=False,
     device="cuda",
     use_vtk=True,
+    smooth=1.0
 ):
 
     if voxel_size is None:
@@ -126,10 +127,7 @@ def create_mesh(
         else:
             # if there is a surface, then extract it & post-process
             # for mesh_idx in range(objects):
-            if use_vtk:
-                mesh = sdf_grid_to_mesh_vtk(sdf_values_, voxel_origin, voxel_size)
-            else:
-                mesh = sdf_grid_to_mesh(sdf_values_, voxel_origin, voxel_size)
+            mesh = sdf_grid_to_mesh_vtk(sdf_values_, voxel_origin, voxel_size, smooth=smooth)
             meshes.append(mesh)
 
             if scale_to_original_mesh:
@@ -266,6 +264,7 @@ def sdf_grid_to_mesh_vtk(
     narrow_band=True,
     band_width=3.0,
     pad_voxels=2,
+    smooth=1.0,
 ):
     """
     Create mesh from SDF values using VTK Flying Edges algorithm instead of marching cubes.
@@ -308,6 +307,9 @@ def sdf_grid_to_mesh_vtk(
     grid.origin = crop_origin  # Use the cropped origin
     grid["sdf"] = sub_sdf.ravel(order="F")  # VTK likes column-major
     
+    # Smoothing step (works for ImageData)
+    grid = grid.gaussian_smooth(std_dev=smooth)
+    
     # Apply Flying Edges 3D algorithm
     fe = vtk.vtkFlyingEdges3D()
     fe.SetInputData(grid)
@@ -316,7 +318,11 @@ def sdf_grid_to_mesh_vtk(
     fe.Update()
     
     # Wrap the output as PyVista mesh and create mskt mesh directly
-    mesh = mskt.mesh.Mesh(mesh=fe.GetOutput())    
+    mesh = mskt.mesh.Mesh(mesh=fe.GetOutput())  
+    # Optional: Keep only largest connected component
+    mesh_pv = pv.wrap(mesh.mesh)
+    mesh_pv = mesh_pv.connectivity(largest=True)
+    mesh = mskt.mesh.Mesh(mesh=mesh_pv)  
     if verbose:
         print(f"Extracted mesh with {mesh.n_points} vertices and {mesh.n_faces_strict} faces") # TO DO: KW changed from mesh.n_faces to mesh.n_faces_strict
         print("Creating final mesh object...")    
