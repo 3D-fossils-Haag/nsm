@@ -26,13 +26,15 @@ from NSM.optimization import pca_initialize_latent, get_top_k_pcs
 meshes.Mesh.load_mesh_scalars = safe_load_mesh_scalars
 meshes.Mesh.point_coords = property(fixed_point_coords)
 
+
 # Define training directory
-TRAIN_DIR = "run_v41" # TO DO: Choose training directory containing model ckpt and latent codes
+TRAIN_DIR = "run_v44" # TO DO: Choose training directory containing model ckpt and latent codes
 os.chdir(TRAIN_DIR)
-CKPT = '1000' # TO DO: Choose the ckpt value you want to analyze results for
+CKPT = '2000' # TO DO: Choose the ckpt value you want to analyze results for
 LC_PATH = 'latent_codes' + '/' + CKPT + '.pth'
 MODEL_PATH = 'model' + '/' + CKPT + '.pth'
-partial_specimen = False  # TO DO: indicate if specimen(s) is/are partial
+sample_by_bbox = False  # TO DO: indicate if want to sample from manually placed bounding box from Slicer
+sample_by_mrks = False # TO DO: indicate if want to sample from manually placed markups from Slicer
 
 # Load model config
 config = load_config(config_path='model_params_config.json')
@@ -41,11 +43,20 @@ device = config.get("device", "cuda:0")
 # Select paths to meshes for shape completion
 mesh_dir = "path/to/your/shape_completion/partial_meshes" # TO: Update path to your partial meshes made with create_partial_meshes.py
 mesh_list = random.sample([os.path.join(mesh_dir, name) for name in os.listdir(mesh_dir)], 20) # TO DO: Update how many to randomly sample
-
 # Select corresponding bounding boxes with intact regions of specimens outlined (filenames should match meshes, but with .mrk.json extension)
-bbox_list = [os.path.splitext(mesh_item)[0] + ".mrk.json" for mesh_item in mesh_list] # TO DO: Enter paths here
+bbox_list = [os.path.join(dir, fname) for fname in os.listdir(dir) if ".mrk.json" in fname] # TO DO: Enter paths here
+#bbox_list = [os.path.splitext(mesh_list[0])[0] + ".mrk.json"]
 
 # Define functions
+
+def load_slicer_mrkup_pts(json_path):
+    with open(json_path, 'r') as f:
+        data = json.load(f)
+    markups = data["markups"][0]              # first markup node
+    points = markups["controlPoints"]        # list of control point dicts
+    # Extract positions
+    pts = np.array([p["position"] for p in points], dtype=np.float32)
+    return pts
 
 # Optimize latent from partial pointcloud (model has no encoder, so need to optimize before feeding in new data)
 def optimize_latent_partial(decoder, partial_pts, latent_dim, mean_latent=None, latent_init=None, iters=2000, 
@@ -54,11 +65,9 @@ def optimize_latent_partial(decoder, partial_pts, latent_dim, mean_latent=None, 
     decoder = decoder.to(device)
     decoder.eval()
     if isinstance(partial_pts, np.ndarray):
-        partial_pts, sdfs = sample_near_surface(torch.tensor(partial_pts, dtype=torch.float32), eps=0.005, fraction_nonzero=0.4, 
-                        fraction_far=0.05, far_eps=0.05)
-    else:
-        partial_pts, sdfs = sample_near_surface(partial_pts, eps=0.005, fraction_nonzero=0.4, 
-                        fraction_far=0.05, far_eps=0.05)
+        partial_pts = torch.tensor(partial_pts, dtype=torch.float32)
+    partial_pts, sdfs = sample_near_surface(partial_pts, eps=0.005, fraction_nonzero=0.4, 
+                                            fraction_far=0.05, far_eps=0.05)
     partial_pts = torch.tensor(partial_pts, dtype=torch.float32)
     partial_pts = partial_pts.to(device)
     target = torch.tensor(sdfs, dtype=torch.float32).to(device)
@@ -79,7 +88,7 @@ def optimize_latent_partial(decoder, partial_pts, latent_dim, mean_latent=None, 
         # Evaluate predicted SDFs in mini-batches to save memory
         preds = get_sdfs(decoder, partial_pts, latent, batch_size=batch_inference_size, device=device)  # (N,1)
         # surface loss (absolute SDF near 0)
-        sdf_loss = F.l1_loss(preds, target)
+        sdf_loss = F.l1_loss(preds.to(device), target)
         # latent prior: encourage closeness to mean_latent
         reg_loss = torch.mean((latent - mean_latent.to(device)) ** 2)
         loss = sdf_loss + lambda_reg * reg_loss
@@ -91,6 +100,8 @@ def optimize_latent_partial(decoder, partial_pts, latent_dim, mean_latent=None, 
         with torch.no_grad():
             if clamp_val is not None:
                 offset = latent - mean_latent.to(latent.device)   # shape (1, D)
+                clamp_val = clamp_val.to(device)
+                offset = offset.to(device)
                 offset[:] = torch.clamp(offset, -clamp_val, clamp_val) # in-place to offset
                 latent[:] = mean_latent.to(latent.device) + offset
         loss_log.append(float(loss.item()))
@@ -232,7 +243,7 @@ def sample_near_surface(surface_pts, eps=0.005, fraction_nonzero=0.3,
 # Load model and latent codes
 model, latent_ckpt, latent_codes = load_model_and_latents(MODEL_PATH, LC_PATH, config, device)
 mean_latent = latent_codes.mean(dim=0, keepdim=True)
-_, top_k_reg = get_top_k_pcs(latent_codes, threshold=0.95)
+_, top_k_reg = get_top_k_pcs(latent_codes, threshold=0.99)
 
 # Loop through meshes
 summary_log = []
@@ -276,11 +287,13 @@ for i, vert_fname in enumerate(mesh_list):
     points = sample_dict['xyz'].to(device) # shape: [N, 3]
     sdf_vals = sample_dict['gt_sdf']  # shape: [N, 1]
     # Load points from specified bounding box or randomly downsample mesh
-    if partial_specimen:
+    if sample_by_bbox:
         bbox = load_slicer_roi_bbox(bbox_list[i])
-        partial_pts = sample_points_in_bbox(vert_fname, bbox, n_points=1200)
-    else:
-        partial_pts = downsample_partial_pointcloud(vert_fname, 1200)
+        partial_pts = sample_points_in_bbox(vert_fname, bbox, n_points=800)
+    elif sample_by_mrks:
+        partial_pts = load_slicer_mrkup_pts(bbox_list[i])
+    else: # Downsample intact ground truth mesh
+        partial_pts = downsample_partial_pointcloud(vert_fname, 180)
     partial_pts = torch.tensor(partial_pts, dtype=torch.float32)
     partial_cloud = pv.PolyData(partial_pts.cpu().numpy())
     partial_cloud.save(outfpath + "/" + os.path.splitext(os.path.basename(vert_fname))[0] + "_partial_input.vtk")
@@ -288,14 +301,18 @@ for i, vert_fname in enumerate(mesh_list):
     # Optimize latents
     print("Optimizing latents")
     # Phase 1 - Coarse Optimization - get a global shape in the right area of latent space (close to target specimen (far enough from mean); but not so far from mean that it is noisy or unrealistic)
-    latent_partial, loss_log = optimize_latent_partial(model, partial_pts, config['latent_size'], mean_latent=mean_latent, latent_init=latent_codes, top_k=top_k_reg, iters=3000, lr=1.5e-4, lambda_reg=7e-7, clamp_val=None)
+    latent_partial, loss_log = optimize_latent_partial(model, partial_pts, config['latent_size'], mean_latent=mean_latent, latent_init=latent_codes, top_k=top_k_reg, 
+                                                       iters=5000, lr=1e-4, lambda_reg=1e-3, clamp_val=2.0 * latent_codes.std().mean(), scheduler_step=800, scheduler_gamma=0.8, 
+                                                       batch_inference_size=32768, multi_stage=False)
     # Phase 2 - Refinement - emphasis on local SDF samples and surface consistency to refine target specimen shape
-    latent_partial, loss_log = optimize_latent_partial(model, partial_pts, config['latent_size'], latent_init=latent_partial, iters=5000, lr=1.3e-5, lambda_reg=0.7e-4, clamp_val=None, multi_stage=True)
+    latent_partial, loss_log = optimize_latent_partial(model, partial_pts, config['latent_size'], latent_init=latent_partial, top_k=top_k_reg, 
+                                                        iters=8000, lr=1.3e-5, lambda_reg=0.7e-4, clamp_val=None, scheduler_step=800, scheduler_gamma=0.7, 
+                                                        batch_inference_size=32768, multi_stage=True) # True because second stage using already initialized latent
     print("Translated novel mesh into latent space!")
     
     # Reconstruction parameters
     recon_grid_origin = 1.0
-    n_pts_per_axis = 384 # TO DO: Adjust resolution
+    n_pts_per_axis = 256 # TO DO: Adjust resolution
     voxel_origin = (-recon_grid_origin, -recon_grid_origin, -recon_grid_origin)
     voxel_size = (recon_grid_origin * 2) / (n_pts_per_axis - 1)
     offset = np.array([0.0, 0.0, 0.0])
@@ -305,20 +322,10 @@ for i, vert_fname in enumerate(mesh_list):
 
     # Reconstruct the novel mesh
     with torch.no_grad():
-        mesh_out = create_mesh(decoder=model,
-                                latent_vector=latent_partial,
-                                n_pts_per_axis=n_pts_per_axis,
-                                voxel_origin=voxel_origin,
-                                voxel_size=voxel_size,
-                                path_original_mesh=None,
-                                offset=offset,
-                                scale=scale,
-                                icp_transform=icp_transform,
-                                objects=objects,
-                                verbose=True,
-                                device=device,
-                                #iso_value=-0.002,
-                                )
+        mesh_out = create_mesh(decoder=model, latent_vector=latent_partial, n_pts_per_axis=n_pts_per_axis,
+                                voxel_origin=voxel_origin, voxel_size=voxel_size, path_original_mesh=None,
+                                offset=offset, scale=scale, icp_transform=icp_transform, objects=objects,
+                                verbose=True, device=device, smooth=1.0)
         
     # Ensure it's PyVista PolyData
     if isinstance(mesh_out, list):
@@ -332,5 +339,11 @@ for i, vert_fname in enumerate(mesh_list):
     mesh_pv = mesh_pv.clean()
     mesh_pv = mesh_pv.triangulate()
     output_path = outfpath + "/" + os.path.splitext(os.path.basename(vert_fname))[0] + "_shape_completion.vtk"
+    # Set color: RGB in range 0–255 or 0–1
+    color = np.array([112, 215, 222], dtype=np.uint8)  
+    # Broadcast color to all points
+    rgb = np.tile(color, (mesh_pv.n_points, 1))
+    mesh_pv.point_data.clear()
+    mesh_pv.point_data['Colors'] = rgb
     mesh_pv.save(output_path)
     print(f"Completed mesh from partial pointcloud saved to: {output_path}")
