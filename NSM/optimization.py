@@ -7,6 +7,7 @@ import torch
 from NSM.helper_funcs import get_sdfs  
 import pyvista as pv
 import open3d as o3d
+import json
 
 # Initialize latent near PCA offset mean
 def pca_initialize_latent(mean_latent, latent_codes, top_k=10):
@@ -209,3 +210,79 @@ def optimize_latent_partial(decoder, partial_pts, sdfs, latent_dim, mean_latent=
             lr_now = scheduler.get_last_lr()[0] if hasattr(scheduler, 'get_last_lr') else optimizer.param_groups[0]['lr']
             print(f"[{step:4d}/{iters}] loss={loss.item():.6e} sdf={sdf_loss.item():.6e} reg={reg_loss.item():.6e} lr={lr_now:.2e}")
     return latent.detach(), loss_log
+
+# Load in manually placed landmark points from 3D Slicer markups file
+def load_slicer_mrkup_pts(json_path):
+    with open(json_path, 'r') as f:
+        data = json.load(f)
+    markups = data["markups"][0]              # first markup node
+    points = markups["controlPoints"]        # list of control point dicts
+    # Extract positions
+    pts = np.array([p["position"] for p in points], dtype=np.float32)
+    return pts
+
+# Load in a bounding box ROI from 3D slicer
+def load_slicer_roi_bbox(json_path):
+    with open(json_path, 'r') as f:
+        data = json.load(f)
+    roi = data["markups"][0]
+    center = np.array(roi["center"])
+    size = np.array(roi["size"])
+    orientation = np.array(roi["orientation"]).reshape(3, 3)
+    # Compute half-axes in world coordinates
+    half_size = size / 2.0
+    axes = orientation * half_size[np.newaxis, :]
+    local_corners = np.array([
+        [-1, -1, -1],
+        [ 1, -1, -1],
+        [-1,  1, -1],
+        [ 1,  1, -1],
+        [-1, -1,  1],
+        [ 1, -1,  1],
+        [-1,  1,  1],
+        [ 1,  1,  1]]) * half_size
+    world_corners = (orientation @ local_corners.T).T + center
+    # Create PyVista box mesh
+    bbox_params = (half_size, orientation, center)
+    return bbox_params
+
+# Sample points on surface within input bounding box dimensions
+def sample_points_in_bbox(mesh_path, bbox_params, n_points=500, method='poisson'):
+    # Read mesh with PyVista
+    mesh_pv = pv.read(mesh_path)
+    if not mesh_pv.is_all_triangles:
+        mesh_pv = mesh_pv.triangulate()
+    # Smooth mesh to denoise
+    mesh_pv = mesh_pv.smooth(n_iter=50, relaxation_factor=0.01)
+    # Convert to Open3D mesh
+    vertices = np.asarray(mesh_pv.points)
+    faces = np.asarray(mesh_pv.faces.reshape(-1, 4)[:, 1:])  # PyVista stores faces as [n, i, j, k]
+    mesh_o3d = o3d.geometry.TriangleMesh(
+        vertices=o3d.utility.Vector3dVector(vertices),
+        triangles=o3d.utility.Vector3iVector(faces))
+    mesh_o3d.compute_vertex_normals()    # Convert to Open3D for Poisson disk sampling
+    oversample_factor = 5
+    n_sample = n_points * oversample_factor
+    if method == 'poisson':
+        pcd = mesh_o3d.sample_points_poisson_disk(number_of_points=n_sample)
+    else:
+        pcd = mesh_o3d.sample_points_uniformly(number_of_points=n_sample)
+    pts = np.asarray(pcd.points)
+    # Transform points to ROI's local coordinate system
+    half_size, orientation, center = bbox_params
+    rel_pts = pts - center
+    local_pts = rel_pts @ orientation.T  # rotate into ROI frame
+    # Create mask for points inside the box extents
+    in_x = np.abs(local_pts[:, 0]) <= half_size[0]
+    in_y = np.abs(local_pts[:, 1]) <= half_size[1]
+    in_z = np.abs(local_pts[:, 2]) <= half_size[2]
+    mask = in_x & in_y & in_z
+    pts_inside = pts[mask]
+    if len(pts_inside) < n_points:
+        print(f"Warning: only {len(pts_inside)} surface points inside ROI (requested {n_points})")
+        n_points_final = len(pts_inside)
+    else:
+        n_points_final = n_points
+        idx = np.random.choice(len(pts_inside), n_points_final, replace=False)
+        pts_inside = pts_inside[idx]
+    return pts_inside
