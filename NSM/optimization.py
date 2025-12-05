@@ -1,8 +1,12 @@
 # Utility functions for fine-tuning optimization of novel meshes in trained models
 
 from sklearn.decomposition import PCA
+import torch.nn.functional as F
 import numpy as np
 import torch
+from NSM.helper_funcs import get_sdfs  
+import pyvista as pv
+import open3d as o3d
 
 # Initialize latent near PCA offset mean
 def pca_initialize_latent(mean_latent, latent_codes, top_k=10):
@@ -66,3 +70,142 @@ def find_similar_cos(latent_novel, latent_codes, top_k=5, n_std=2, device='cuda'
     print(f"similar_ids shape: {similar_ids.shape}")
     print(f"similar_ids: {similar_ids}")
     return similar_ids.tolist(), cosine_distances[similar_ids].tolist()
+
+# Optimize latent vector for inference (since DeepSDF has no encoder, this is how you run novel data through for inference)
+def optimize_latent(decoder, points, sdf_vals, latent_size, top_k, mean_latent, latent_codes, iters=1000, lr=1e-3, device='cuda'):
+    init_latent_torch = pca_initialize_latent(mean_latent, latent_codes, top_k) # initialize near mean using PCAs for regularization
+    latent = init_latent_torch.clone().detach().requires_grad_()
+    optimizer = torch.optim.Adam([latent], lr=lr)
+    sdf_vals = sdf_vals.to(device)
+    decoder = decoder.to(device)
+    points = points.to(device)
+    for i in range(iters):
+        optimizer.zero_grad()
+        pred_sdf = get_sdfs(decoder, points, latent)
+        loss = F.l1_loss(pred_sdf.squeeze(), sdf_vals)
+        loss.backward()
+        optimizer.step()
+        if i % 200 == 0 or i == iters - 1:
+            print(f"[{i}/{iters}] Loss: {loss.item():.6f}")
+    return latent.detach().to(device)
+
+# Sample points near and far from surface to get range of SDF values for smooth interpolation
+def sample_near_surface(surface_pts, eps=0.005, fraction_nonzero=0.3, 
+                        fraction_far=0.05, far_eps=0.05):
+    n_pts = surface_pts.shape[0]
+    # Slightly perturbed points (near-surface)
+    n_nonzero = int(n_pts * fraction_nonzero)
+    idx_near = torch.randperm(n_pts)[:n_nonzero]
+    base_near = surface_pts[idx_near]
+    dirs_near = torch.randn_like(base_near)
+    dirs_near = dirs_near / torch.norm(dirs_near, dim=1, keepdim=True)
+    pts_out_near = base_near + eps * dirs_near
+    pts_in_near  = base_near - eps * dirs_near
+    sdf_out_near = eps  * torch.ones((n_nonzero, 1), device=surface_pts.device)
+    sdf_in_near  = -eps * torch.ones((n_nonzero, 1), device=surface_pts.device)
+    pts_nonzero = torch.cat([pts_out_near, pts_in_near], dim=0)
+    sdf_nonzero = torch.cat([sdf_out_near, sdf_in_near], dim=0)
+    # Farther-away points for regularization
+    n_far = int(n_pts * fraction_far)
+    idx_far = torch.randperm(n_pts)[:n_far]
+    base_far = surface_pts[idx_far]
+    dirs_far = torch.randn_like(base_far)
+    dirs_far = dirs_far / torch.norm(dirs_far, dim=1, keepdim=True)
+    pts_out_far = base_far + far_eps * dirs_far
+    pts_in_far  = base_far - far_eps * dirs_far
+    sdf_out_far = far_eps  * torch.ones((n_far, 1), device=surface_pts.device)
+    sdf_in_far  = -far_eps * torch.ones((n_far, 1), device=surface_pts.device)
+    pts_far = torch.cat([pts_out_far, pts_in_far], dim=0)
+    sdf_far = torch.cat([sdf_out_far, sdf_in_far], dim=0)
+    # Keep remaining points exactly on the surface (SDF=0)
+    n_zero = int(n_pts * (1 - fraction_nonzero - fraction_far))
+    mask = torch.ones(n_pts, dtype=torch.bool)
+    mask[idx_near] = False
+    mask[idx_far] = False
+    pts_zero = surface_pts[mask]
+    sdf_zero = torch.zeros((pts_zero.shape[0], 1), device=surface_pts.device)
+    # Combine everything
+    pts = torch.cat([pts_zero, pts_nonzero, pts_far], dim=0)
+    sdf = torch.cat([sdf_zero, sdf_nonzero, sdf_far], dim=0)
+    print(f"Sampled {fraction_nonzero*100}% of points (n={n_nonzero}) near the surface with a non-zero SDF (±eps = {eps})\n \
+          {fraction_far*100}% of points (n={n_far}) sampled far from the surface (±far_eps={far_eps})\n \
+          {(1 - fraction_nonzero - fraction_far)*100:.1f}% of points (n={n_zero}) on the surface with SDF=0.")
+    return pts, sdf
+
+# Downsample pointcloud 
+def downsample_partial_pointcloud(mesh_path, n_points=5000, voxel_fraction=0.01, method='poisson'):
+    # Read mesh with PyVista
+    mesh_pv = pv.read(mesh_path)
+    if not mesh_pv.is_all_triangles:
+        mesh_pv = mesh_pv.triangulate()
+    # Smooth mesh to denoise
+    mesh_pv = mesh_pv.smooth(n_iter=50, relaxation_factor=0.01)
+    # Convert to Open3D mesh
+    vertices = np.asarray(mesh_pv.points)
+    faces = np.asarray(mesh_pv.faces.reshape(-1, 4)[:, 1:])  # PyVista stores faces as [n, i, j, k]
+    mesh_o3d = o3d.geometry.TriangleMesh(
+        vertices=o3d.utility.Vector3dVector(vertices),
+        triangles=o3d.utility.Vector3iVector(faces))
+    mesh_o3d.compute_vertex_normals()
+    # Uniform or Poisson disk sampling
+    if method == 'poisson':
+        pcd = mesh_o3d.sample_points_poisson_disk(number_of_points=n_points)
+    else:
+        pcd = mesh_o3d.sample_points_uniformly(number_of_points=n_points)
+    # Voxel downsample
+    bbox = pcd.get_axis_aligned_bounding_box()
+    diag = np.linalg.norm(np.array(bbox.get_extent()))
+    voxel_size = max(diag * voxel_fraction, 1e-5)  # ensure nonzero voxel size
+    pcd_down = pcd.voxel_down_sample(voxel_size=voxel_size)
+    pts = np.asarray(pcd_down.points)
+    print(f"Downsampled from {len(mesh_pv.points)} → to {len(pts)} points (voxel={voxel_size:.4f})")
+    return pts
+
+# Optimize latent from partial pointcloud (model has no encoder, so need to optimize before feeding in new data)
+def optimize_latent_partial(decoder, partial_pts, sdfs, latent_dim, mean_latent=None, latent_init=None, iters=2000, 
+                            lr=1e-4, lambda_reg=1e-4, clamp_val=None, scheduler_step=1000, scheduler_gamma=0.5, 
+                            top_k=200, batch_inference_size=32768, verbose=True, device='cuda', multi_stage=False):
+    decoder = decoder.to(device)
+    decoder.eval()
+    partial_pts = partial_pts.clone().detach().to(device)
+    target = sdfs.clone().detach().to(device)
+    # If multi-stage optimization, intialize from previous latent, not mean
+    if multi_stage:
+        print("\nPhase 2\n")
+        mean_latent = latent_init.clone().detach()
+        latent = latent_init.clone().detach().to(device).requires_grad_(True)
+    # If single-stage, initialize from pca based mean of latent codes
+    else:
+        print("\nPhase 1\n")
+        mean_latent = mean_latent.clone().detach()
+        latent = pca_initialize_latent(mean_latent, latent_init, top_k).clone().detach()
+        latent = latent.to(device).requires_grad_(True)
+    optimizer = torch.optim.Adam([latent], lr=lr)
+    scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=scheduler_step, gamma=scheduler_gamma)
+    loss_log = []
+    for step in range(iters):
+        optimizer.zero_grad()
+        # Evaluate predicted SDFs in mini-batches to save memory
+        preds = get_sdfs(decoder, partial_pts, latent, batch_size=batch_inference_size, device=device)  # (N,1)
+        # surface loss (absolute SDF near 0)
+        sdf_loss = F.l1_loss(preds.to(device), target)
+        # latent prior: encourage closeness to mean_latent
+        reg_loss = torch.mean((latent - mean_latent.to(device)) ** 2)
+        loss = sdf_loss + lambda_reg * reg_loss
+        loss.backward()
+        # gradient clipping and step
+        torch.nn.utils.clip_grad_norm_([latent], 1.0)
+        optimizer.step()
+        scheduler.step()
+        with torch.no_grad():
+            if clamp_val is not None:
+                offset = latent - mean_latent.to(latent.device)   # shape (1, D)
+                clamp_val = clamp_val.to(device)
+                offset = offset.to(device)
+                offset[:] = torch.clamp(offset, -clamp_val, clamp_val) # in-place to offset
+                latent[:] = mean_latent.to(latent.device) + offset
+        loss_log.append(float(loss.item()))
+        if verbose and (step % 100 == 0 or step == iters-1):
+            lr_now = scheduler.get_last_lr()[0] if hasattr(scheduler, 'get_last_lr') else optimizer.param_groups[0]['lr']
+            print(f"[{step:4d}/{iters}] loss={loss.item():.6e} sdf={sdf_loss.item():.6e} reg={reg_loss.item():.6e} lr={lr_now:.2e}")
+    return latent.detach(), loss_log
