@@ -20,7 +20,7 @@ import re
 import random
 import open3d as o3d
 from NSM.helper_funcs import NumpyTransform, load_config, load_model_and_latents, convert_ply_to_vtk, get_sdfs, fixed_point_coords, safe_load_mesh_scalars 
-from NSM.optimization import pca_initialize_latent, get_top_k_pcs, sample_near_surface, downsample_partial_pointcloud, optimize_latent_partial
+from NSM.optimization import pca_initialize_latent, get_top_k_pcs, sample_near_surface, downsample_partial_pointcloud, optimize_latent_partial, sample_points_in_bbox, load_slicer_mrkup_pts, load_slicer_roi_bbox
 # Monkey Patch into pymskt.mesh.meshes.Mesh
 meshes.Mesh.load_mesh_scalars = safe_load_mesh_scalars
 meshes.Mesh.point_coords = property(fixed_point_coords)
@@ -40,85 +40,18 @@ config = load_config(config_path='model_params_config.json')
 device = config.get("device", "cuda:0")
 
 # Select paths to meshes for shape completion
-mesh_dir = "path/to/your/shape_completion/partial_meshes" # TO: Update path to your partial meshes made with create_partial_meshes.py
-mesh_list = random.sample([os.path.join(mesh_dir, name) for name in os.listdir(mesh_dir)], 20) # TO DO: Update how many to randomly sample
-
+#mesh_dir = "path/to/your/shape_completion/partial_meshes" # TO: Update path to your partial meshes made with create_partial_meshes.py
+#mesh_list = random.sample([os.path.join(mesh_dir, name) for name in os.listdir(mesh_dir)], 20) # TO DO: Update how many to randomly sample
+#mesh_list = random.sample(config['test_paths'], 100)
+#mesh_list = random.sample(config['val_paths'], 5) # TO DO: Choose val or test paths
+#mesh_list = ["/home/k.wolcott/NSM/nsm/exclu/zzzzz_fossil_parviraptoraa_fillholes_smooth_hollow.vtk", "/home/k.wolcott/NSM/nsm/exclu/zzzzz_fossil_uf546657_fillholes_smooth_hollow.vtk"] # TO DO: Enter paths here
+mesh_list = [fname for fname in os.listdir("/home/k.wolcott/NSM/nsm/exclu") if "_fillholes_smooth" in fname]
+dir = "/home/k.wolcott/NSM/nsm/exclu"
+mesh_list = [os.path.join(dir, fname) for fname in os.listdir(dir) if "_fillholes_smooth" in fname]   
+#mesh_list = [dir + "/zzzz_dmnh-epv-142201-mad0720-1_fillholes_smooth.vtk"]
 # Select corresponding bounding boxes with intact regions of specimens outlined (filenames should match meshes, but with .mrk.json extension)
 bbox_list = [os.path.join(dir, fname) for fname in os.listdir(dir) if ".mrk.json" in fname] # TO DO: Enter paths here
-
-# Define functions
-def load_slicer_mrkup_pts(json_path):
-    with open(json_path, 'r') as f:
-        data = json.load(f)
-    markups = data["markups"][0]              # first markup node
-    points = markups["controlPoints"]        # list of control point dicts
-    # Extract positions
-    pts = np.array([p["position"] for p in points], dtype=np.float32)
-    return pts
-
-def load_slicer_roi_bbox(json_path):
-    with open(json_path, 'r') as f:
-        data = json.load(f)
-    roi = data["markups"][0]
-    center = np.array(roi["center"])
-    size = np.array(roi["size"])
-    orientation = np.array(roi["orientation"]).reshape(3, 3)
-    # Compute half-axes in world coordinates
-    half_size = size / 2.0
-    axes = orientation * half_size[np.newaxis, :]
-    local_corners = np.array([
-        [-1, -1, -1],
-        [ 1, -1, -1],
-        [-1,  1, -1],
-        [ 1,  1, -1],
-        [-1, -1,  1],
-        [ 1, -1,  1],
-        [-1,  1,  1],
-        [ 1,  1,  1]]) * half_size
-    world_corners = (orientation @ local_corners.T).T + center
-    # Create PyVista box mesh
-    bbox_params = (half_size, orientation, center)
-    return bbox_params
-
-def sample_points_in_bbox(mesh_path, bbox_params, n_points=500, method='poisson'):
-    # Read mesh with PyVista
-    mesh_pv = pv.read(mesh_path)
-    if not mesh_pv.is_all_triangles:
-        mesh_pv = mesh_pv.triangulate()
-    # Smooth mesh to denoise
-    mesh_pv = mesh_pv.smooth(n_iter=50, relaxation_factor=0.01)
-    # Convert to Open3D mesh
-    vertices = np.asarray(mesh_pv.points)
-    faces = np.asarray(mesh_pv.faces.reshape(-1, 4)[:, 1:])  # PyVista stores faces as [n, i, j, k]
-    mesh_o3d = o3d.geometry.TriangleMesh(
-        vertices=o3d.utility.Vector3dVector(vertices),
-        triangles=o3d.utility.Vector3iVector(faces))
-    mesh_o3d.compute_vertex_normals()    # Convert to Open3D for Poisson disk sampling
-    oversample_factor = 5
-    n_sample = n_points * oversample_factor
-    if method == 'poisson':
-        pcd = mesh_o3d.sample_points_poisson_disk(number_of_points=n_sample)
-    else:
-        pcd = mesh_o3d.sample_points_uniformly(number_of_points=n_sample)
-    pts = np.asarray(pcd.points)
-    # Transform points to ROI's local coordinate system
-    half_size, orientation, center = bbox_params
-    rel_pts = pts - center
-    local_pts = rel_pts @ orientation.T  # rotate into ROI frame
-    # Create mask for points inside the box extents
-    in_x = np.abs(local_pts[:, 0]) <= half_size[0]
-    in_y = np.abs(local_pts[:, 1]) <= half_size[1]
-    in_z = np.abs(local_pts[:, 2]) <= half_size[2]
-    mask = in_x & in_y & in_z
-    pts_inside = pts[mask]
-    if len(pts_inside) < n_points:
-        print(f"Warning: only {len(pts_inside)} surface points inside ROI (requested {n_points})")
-        n_points_final = len(pts_inside)
-    else:
-        n_points_final = n_points
-        idx = np.random.choice(len(pts_inside), n_points_final, replace=False)
-        pts_inside = pts_inside[idx]
-    return pts_inside
+#bbox_list = [os.path.splitext(mesh_list[0])[0] + ".mrk.json"]
 
 # Load model and latent codes
 model, latent_ckpt, latent_codes = load_model_and_latents(MODEL_PATH, LC_PATH, config, device)
