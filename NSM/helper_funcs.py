@@ -120,7 +120,7 @@ def get_sdfs(decoder, samples, latent_vector, batch_size=32**3, objects=1, devic
     current_idx = 0
     sdf_values = torch.zeros(samples.shape[0], objects, device=device) 
     if batch_size > n_pts_total:
-        print('WARNING: batch_size is greater than the number of samples, setting batch_size to the number of samples')
+        #print('WARNING: batch_size is greater than the number of samples, setting batch_size to the number of samples')
         batch_size = n_pts_total
     while current_idx < n_pts_total:
         current_batch_size = min(batch_size, n_pts_total - current_idx)
@@ -128,7 +128,7 @@ def get_sdfs(decoder, samples, latent_vector, batch_size=32**3, objects=1, devic
         sdf_values[current_idx : current_idx + current_batch_size, :] = decode_sdf(
             decoder, latent_vector, sampled_pts, device) 
         current_idx += current_batch_size
-        print(f"Processed {current_idx} / {n_pts_total} points")
+        #print(f"Processed {current_idx} / {n_pts_total} points")
     return sdf_values
 
 def decode_sdf(decoder, latent_vector, queries, device='cuda'):
