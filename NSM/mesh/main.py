@@ -610,9 +610,7 @@ def get_sdfs(decoder, samples, latent_vector, batch_size=32**3, objects=1, devic
     sdf_values = torch.zeros(samples.shape[0], objects)
 
     if batch_size > n_pts_total:
-        print(
-            "WARNING: batch_size is greater than the number of samples, setting batch_size to the number of samples"
-        )
+        #print("WARNING: batch_size is greater than the number of samples, setting batch_size to the number of samples")
         batch_size = n_pts_total
 
     batch_num = 0
