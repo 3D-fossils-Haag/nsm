@@ -164,12 +164,14 @@ def downsample_partial_pointcloud(mesh_path, n_points=5000, voxel_fraction=0.01,
 
 # Optimize latent from partial pointcloud (model has no encoder, so need to optimize before feeding in new data)
 def optimize_latent_partial(decoder, partial_pts, sdfs, latent_dim, mean_latent=None, latent_init=None, iters=2000, 
-                            lr=1e-4, lambda_reg=1e-4, clamp_val=None, scheduler_step=1000, scheduler_gamma=0.5, 
+                            lr=1e-4, lambda_reg=1e-4, clamp_val=None, latent_std=None, scheduler_step=1000, scheduler_gamma=0.5, 
                             top_k=200, batch_inference_size=32768, verbose=True, device='cuda', multi_stage=False):
     decoder = decoder.to(device)
     decoder.eval()
+    if isinstance(partial_pts, np.ndarray):
+        partial_pts = torch.tensor(partial_pts, dtype=torch.float32)
     partial_pts = partial_pts.clone().detach().to(device)
-    target = sdfs.clone().detach().to(device)
+    target = torch.tensor(sdfs, dtype=torch.float32).clone().detach().to(device)
     # If multi-stage optimization, intialize from previous latent, not mean
     if multi_stage:
         print("\nPhase 2\n")
@@ -178,9 +180,15 @@ def optimize_latent_partial(decoder, partial_pts, sdfs, latent_dim, mean_latent=
     # If single-stage, initialize from pca based mean of latent codes
     else:
         print("\nPhase 1\n")
-        mean_latent = mean_latent.clone().detach()
-        latent = pca_initialize_latent(mean_latent, latent_init, top_k).clone().detach()
-        latent = latent.to(device).requires_grad_(True)
+        mean_latent = mean_latent.clone().detach().to(device)
+        latent = pca_initialize_latent(mean_latent, latent_init, top_k).clone().detach().to(device).requires_grad_(True)
+    
+    # Define clamp
+    if clamp_val is not None:
+        latent_std = torch.tensor(float(latent_std), dtype=torch.float32)
+        clamp_val = (torch.tensor(float(clamp_val), dtype=torch.float32) * latent_std).to(device)
+    
+    # Run optimization
     optimizer = torch.optim.Adam([latent], lr=lr)
     scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=scheduler_step, gamma=scheduler_gamma)
     loss_log = []
@@ -198,13 +206,11 @@ def optimize_latent_partial(decoder, partial_pts, sdfs, latent_dim, mean_latent=
         torch.nn.utils.clip_grad_norm_([latent], 1.0)
         optimizer.step()
         scheduler.step()
-        with torch.no_grad():
-            if clamp_val is not None:
+        if clamp_val is not None:
+            with torch.no_grad():
                 offset = latent - mean_latent.to(latent.device)   # shape (1, D)
-                clamp_val = clamp_val.to(device)
-                offset = offset.to(device)
-                offset[:] = torch.clamp(offset, -clamp_val, clamp_val) # in-place to offset
-                latent[:] = mean_latent.to(latent.device) + offset
+                offset_clamped = torch.clamp(offset, -clamp_val, clamp_val)
+                latent.copy_(mean_latent.to(latent.device) + offset_clamped)
         loss_log.append(float(loss.item()))
         if verbose and (step % 100 == 0 or step == iters-1):
             lr_now = scheduler.get_last_lr()[0] if hasattr(scheduler, 'get_last_lr') else optimizer.param_groups[0]['lr']
