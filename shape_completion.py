@@ -25,7 +25,6 @@ from NSM.optimization import pca_initialize_latent, get_top_k_pcs, sample_near_s
 meshes.Mesh.load_mesh_scalars = safe_load_mesh_scalars
 meshes.Mesh.point_coords = property(fixed_point_coords)
 
-
 # Define training directory
 TRAIN_DIR = "run_v44" # TO DO: Choose training directory containing model ckpt and latent codes
 os.chdir(TRAIN_DIR)
@@ -40,22 +39,15 @@ config = load_config(config_path='model_params_config.json')
 device = config.get("device", "cuda:0")
 
 # Select paths to meshes for shape completion
-#mesh_dir = "path/to/your/shape_completion/partial_meshes" # TO: Update path to your partial meshes made with create_partial_meshes.py
-#mesh_list = random.sample([os.path.join(mesh_dir, name) for name in os.listdir(mesh_dir)], 20) # TO DO: Update how many to randomly sample
-#mesh_list = random.sample(config['test_paths'], 100)
-#mesh_list = random.sample(config['val_paths'], 5) # TO DO: Choose val or test paths
-#mesh_list = ["/home/k.wolcott/NSM/nsm/exclu/zzzzz_fossil_parviraptoraa_fillholes_smooth_hollow.vtk", "/home/k.wolcott/NSM/nsm/exclu/zzzzz_fossil_uf546657_fillholes_smooth_hollow.vtk"] # TO DO: Enter paths here
-mesh_list = [fname for fname in os.listdir("/home/k.wolcott/NSM/nsm/exclu") if "_fillholes_smooth" in fname]
-dir = "/home/k.wolcott/NSM/nsm/exclu"
-mesh_list = [os.path.join(dir, fname) for fname in os.listdir(dir) if "_fillholes_smooth" in fname]   
-#mesh_list = [dir + "/zzzz_dmnh-epv-142201-mad0720-1_fillholes_smooth.vtk"]
+mesh_dir = "path/to/your/shape_completion/partial_meshes" # TO: Update path to your partial meshes made with create_partial_meshes.py
+mesh_list = random.sample([os.path.join(mesh_dir, name) for name in os.listdir(mesh_dir)], 20) # TO DO: Update how many to randomly sample
+
 # Select corresponding bounding boxes with intact regions of specimens outlined (filenames should match meshes, but with .mrk.json extension)
 bbox_list = [os.path.join(dir, fname) for fname in os.listdir(dir) if ".mrk.json" in fname] # TO DO: Enter paths here
-#bbox_list = [os.path.splitext(mesh_list[0])[0] + ".mrk.json"]
-
 # Load model and latent codes
 model, latent_ckpt, latent_codes = load_model_and_latents(MODEL_PATH, LC_PATH, config, device)
 mean_latent = latent_codes.mean(dim=0, keepdim=True)
+latent_std = latent_codes.std().mean()
 _, top_k_reg = get_top_k_pcs(latent_codes, threshold=0.99)
 
 # Loop through meshes
@@ -114,17 +106,16 @@ for i, vert_fname in enumerate(mesh_list):
     # Sample points with a variety of SDF values (not all = 0 to allow smoother fit)
     partial_pts, sdfs = sample_near_surface(partial_pts, eps=0.005, fraction_nonzero=0.4, 
                                             fraction_far=0.05, far_eps=0.05)
-    partial_pts = partial_pts.clone().detach()
-
+    
     # Optimize latents
     print("\n-----Optimizing latents----\n")
     # Phase 1 - Coarse Optimization - get a global shape in the right area of latent space (close to target specimen (far enough from mean); but not so far from mean that it is noisy or unrealistic)
     latent_partial, _ = optimize_latent_partial(model, partial_pts, sdfs, config['latent_size'], mean_latent=mean_latent, latent_init=latent_codes, top_k=top_k_reg, 
-                                                       iters=5000, lr=1e-4, lambda_reg=1e-3, clamp_val=2.0 * latent_codes.std().mean(), scheduler_step=800, scheduler_gamma=0.8, 
+                                                       iters=5000, lr=1e-4, lambda_reg=1e-3, clamp_val=2.0, latent_std=latent_std, scheduler_step=800, scheduler_gamma=0.8, 
                                                        batch_inference_size=32768, multi_stage=False, device=device)
     # Phase 2 - Refinement - emphasis on local SDF samples and surface consistency to refine target specimen shape
     latent_partial, _ = optimize_latent_partial(model, partial_pts, sdfs, config['latent_size'], latent_init=latent_partial, top_k=top_k_reg, 
-                                                        iters=8000, lr=1.3e-5, lambda_reg=0.7e-4, clamp_val=None, scheduler_step=800, scheduler_gamma=0.7, 
+                                                        iters=8000, lr=1.3e-5, lambda_reg=7e-5, clamp_val=None, latent_std=latent_std, scheduler_step=800, scheduler_gamma=0.7, 
                                                         batch_inference_size=32768, multi_stage=True, device=device) # True because second stage using already initialized latent
     print("\nTranslated novel mesh into latent space!\n")
     
