@@ -11,83 +11,17 @@ from sklearn.neighbors import NearestNeighbors
 from scipy.spatial.distance import cdist
 import re
 from scipy.signal import savgol_filter
-from NSM.helper_funcs import NumpyTransform, pv_to_o3d, load_config, load_model_and_latents, sample_latent_grid, solve_tsp_nearest_neighbor, interpolate_latent_loop
+from NSM.helper_funcs import NumpyTransform, pv_to_o3d, load_config, load_model_and_latents
+from NSM.traverse_latents import sample_latent_grid, solve_tsp_nearest_neighbor, interpolate_latent_loop, project_to_isomap, resample_by_cumulative_distance, plot_latent_paths
 
 # Define model parameters to use for video generation
-TRAIN_DIR = "run_v41" # TO DO: Choose training directory containing model ckpt and latent codes
+TRAIN_DIR = "run_v44" # TO DO: Choose training directory containing model ckpt and latent codes
 os.chdir(TRAIN_DIR)
-CKPT = '1000' # TO DO: Choose the ckpt value you want to analyze results for
+CKPT = '2000' # TO DO: Choose the ckpt value you want to analyze results for
 LC_PATH = 'latent_codes' + '/' + CKPT + '.pth'
 MODEL_PATH = 'model' + '/' + CKPT + '.pth'
 USE_AVERAGES = True # TO DO: Use region averages or individual vertebrae?
-
-# Define functions
-def resample_by_cumulative_distance(latents, n_frames):
-    diffs = np.linalg.norm(np.diff(latents, axis=0), axis=1)
-    dists = np.concatenate([[0], np.cumsum(diffs)])
-    dists /= dists[-1]  # Normalize to [0, 1]
-    new_steps = np.linspace(0, 1, n_frames)
-    new_latents = np.array([
-        np.interp(new_steps, dists, latents[:, i]) for i in range(latents.shape[1])]).T
-    return new_latents
-
-def project_to_isomap(latents_query, latents_all, isomap_2d):
-    tree = cKDTree(latents_all)
-    _, indices = tree.query(latents_query, k=1)
-    return isomap_2d[indices], indices
-
-def plot_latent_paths(isomap_2d, sampled_points, vert_region, use_averages=False, save_dir="."):
-    # Plot settings
-    line_width = 2
-    alpha = 0.7
-    start_marker_size = 50
-    end_marker_size = 50
-    path_dict = { # TO DO: Adjust plotting colors
-    "loop": {
-        "data": loop_2d,
-        "color": "violet",
-        "title": "Latent Interpolation Path"},
-    "tsp": {
-        "data": tsp_2d,
-        "color": "olivedrab",
-        "title": "TSP-Ordered Path"},
-    "smooth": {
-        "data": smooth_loop_2d,
-        "color": "deepskyblue",
-        "title": "Smoothed TSP Path"}}
-    # Create subplots
-    fig, axs = plt.subplots(1, 3, figsize=(18, 6), sharex=True, sharey=True)
-    for ax, (key, path_info) in zip(axs, path_dict.items()):
-        path = path_info["data"]
-        color = path_info["color"]
-        title = path_info["title"]
-        ax.set_title(title)
-        ax.scatter(isomap_2d[:, 0], isomap_2d[:, 1], c='lightgray', marker='o', s=10, label='All codes')
-        ax.scatter(sampled_points[:, 0], sampled_points[:, 1], marker='x', s=20, color='dimgrey', label='Sample Grid')
-        # Path line
-        ax.plot(path[:, 0], path[:, 1], '-', lw=line_width, color=color, alpha=alpha, label=f'Path ({key})')
-        # Start and end points
-        ax.scatter(*path[0], color=color, edgecolor='black', marker='o', s=start_marker_size, alpha=alpha, label='Start')
-        ax.scatter(*path[-1], color=color, edgecolor='black', marker='X', s=end_marker_size, alpha=alpha, label='End')
-        ax.set_aspect('equal', adjustable='box')
-    # Legend on the last subplot
-    axs[-1].legend(
-        loc='center left',
-        bbox_to_anchor=(1, 0.5),
-        borderaxespad=0.0,
-        fontsize='small')
-    # Title and save
-    plt.suptitle("Latent Interpolation Paths in Isomap 2D", fontsize=16)
-    plt.tight_layout(rect=[0, 0, 0.92, 0.95])
-    # Save figure
-    figpath = os.path.join(save_dir, f"latent_space_path_overlay_isomap_video_C-T-L") # TO DO: define file path
-    if use_averages == True:
-        figpath = figpath + '_avg' + '.png'
-    else:
-        figpath = figpath + '.png'
-    plt.savefig(figpath, dpi=300, bbox_inches='tight')
-    plt.close()
-    print(f"\033[92mSaved latent space path overlay to {figpath}\033[0m")
+vertebral_regions = ['C', 'T', 'L'] # TO DO: Define vertebral regions to inspect
 
 # Load config
 config = load_config(config_path='model_params_config.json')
@@ -99,7 +33,6 @@ all_vtk_files = [os.path.basename(f) for f in train_paths]
 model, latent_ckpt, latent_codes = load_model_and_latents(MODEL_PATH, LC_PATH, config, device)
 
 # Define vertebral regions
-vertebral_regions = ['C', 'T', 'L']
 latent_codes_subs = []
 all_vtk_files_subs = []
 # Match "_C1" to "_C40" or "-C1" to "-C40"
@@ -224,7 +157,7 @@ smooth_loop_2d, loop_idx = project_to_isomap(smooth_latent_loop, latents_np, iso
 closest_specimens = [all_vtk_files_subs[i] for i in loop_idx]
 
 # Plot path in latent space
-plot_latent_paths(isomap_2d, sampled_points, vert_region, USE_AVERAGES)
+plot_latent_paths(isomap_2d, loop_2d, tsp_2d, smooth_loop_2d, sampled_points, vertebral_regions, USE_AVERAGES)
 
 # Setup Offscreen Renderers (4)
 width, height = 640, 480
