@@ -11,7 +11,7 @@ from sklearn.neighbors import NearestNeighbors
 from scipy.spatial.distance import cdist
 import re
 from scipy.signal import savgol_filter
-from NSM.helper_funcs import NumpyTransform, pv_to_o3d, load_config, load_model_and_latents
+from NSM.helper_funcs import NumpyTransform, pv_to_o3d, load_config, load_model_and_latents, average_across_regions, overlay_text_on_frame, render_cameras, generate_and_render_mesh
 from NSM.traverse_latents import sample_latent_grid, solve_tsp_nearest_neighbor, interpolate_latent_loop, project_to_isomap, resample_by_cumulative_distance, plot_latent_paths
 
 # Define model parameters to use for video generation
@@ -35,18 +35,13 @@ model, latent_ckpt, latent_codes = load_model_and_latents(MODEL_PATH, LC_PATH, c
 # Define vertebral regions
 latent_codes_subs = []
 all_vtk_files_subs = []
-# Match "_C1" to "_C40" or "-C1" to "-C40"
+# To find all vertebrae for each vertebral region across all specimens
 for vert_region in vertebral_regions:
-    r_p = r'[_-]' + vert_region + r'([1-9]|[1-3][0-9]|40)(?!\d)'
+    r_p = r'[_-]' + vert_region + r'([1-9]|[1-3][0-9]|200)(?!\d)' # Match "_C1" to "_C200" or "-C1" to "-C200"
     pattern = re.compile(r_p, re.IGNORECASE)
     # Subset indices from all paths
-    matches = [
-                (i, int(pattern.search(fname).group(1)))
-                for i, fname in enumerate(all_vtk_files)
-                if pattern.search(fname)
-                ]
+    matches = [(i, int(pattern.search(fname).group(1))) for i, fname in enumerate(all_vtk_files) if pattern.search(fname)]
     indices = [i for i, _ in matches]
-    #cervical_nums = [num for _, num in matches]
 
     # Filter latent codes and corresponding mesh paths
     vert_region_codes = latent_codes[indices]
@@ -54,37 +49,12 @@ for vert_region in vertebral_regions:
     print(f"\n\nFound {len(vert_region_files)} latent codes for region: {vert_region}")
     print(f"Sample files: {vert_region_files[:5]}\n\n")
 
-    # To average across vertebrae regions
+    # To average across vertebrae regions per specimen
     # Regex to extract specimen ID from filename by removing "_C1" or "-C1", etc.
     if USE_AVERAGES == True:
-        r_p_specimen = r'^(.*?)(?:[-_]\d+[-_]' + vert_region + r'\d+)(?:.*)$'
-        specimen_pattern = re.compile(r_p_specimen, re.IGNORECASE)
-        specimen_latents = {}
-        specimen_files = {}
-        for fname, latent in zip(vert_region_files, vert_region_codes):
-            match = specimen_pattern.match(fname)
-            if match:
-                specimen_id = match.group(1)
-                if specimen_id not in specimen_latents:
-                    specimen_latents[specimen_id] = []
-                    specimen_files[specimen_id] = []
-                specimen_latents[specimen_id].append(latent.numpy())
-                specimen_files[specimen_id].append(fname)
-            else:
-                print(f"\033[93mWarning: could not extract specimen ID from {fname}\033[0m")
-
-        # Average the latent codes per specimen
-        avg_latent_codes = []
-        avg_specimen_ids = []
-        for specimen_id, latents in specimen_latents.items():
-            avg_latent = np.mean(latents, axis=0)
-            avg_latent_codes.append(avg_latent)
-            avg_specimen_ids.append(specimen_id + '_' + vert_region)
-        # Convert to NumPy array
-        avg_latent_codes = np.array(avg_latent_codes)
-        print(f"\nAveraged latent codes for {len(avg_specimen_ids)} specimens.\nSample specimen IDs: {avg_specimen_ids[:5]}")
-        vert_region_codes = avg_latent_codes
-        vert_region_files = avg_specimen_ids
+        r_p = r'^(.*?)(?:[-_]\d+[-_]' + vert_region + r'\d+)(?:.*)$'
+        vert_region_files, vert_region_codes = average_across_regions(r_p, vert_region, vert_region_files, vert_region_codes)
+    
     # Add to dictionary
     latent_codes_subs.extend(vert_region_codes)
     all_vtk_files_subs.extend(vert_region_files)
@@ -95,7 +65,7 @@ print(f"Running analysis for : {len(all_vtk_files_subs)} averaged latent codes f
 
 # Mesh creation params
 recon_grid_origin = 1.0
-n_pts_per_axis = 384
+n_pts_per_axis = 256
 voxel_origin = (-recon_grid_origin, -recon_grid_origin, -recon_grid_origin)
 voxel_size = (recon_grid_origin * 2) / (n_pts_per_axis - 1)
 offset = np.array([0.0, 0.0, 0.0])
@@ -184,99 +154,17 @@ loop_sequence = smooth_latent_loop
 loop_sequence_names = closest_specimens
 for i, latent_code in enumerate(loop_sequence):
     try:
-        generated_mesh_count += 1
-        print(f"\033[92m\nGenerating mesh {generated_mesh_count}/{len(loop_sequence)}\033[0m")
-        print(f"Frame {i}: Closest to {loop_sequence_names[i]}")
-        new_latent = torch.tensor(latent_code, dtype=torch.float32).unsqueeze(0).to(device)
-
-        mesh_out = create_mesh(
-            decoder=model, latent_vector=new_latent, n_pts_per_axis=n_pts_per_axis,
-            voxel_origin=voxel_origin, voxel_size=voxel_size, path_original_mesh=None,
-            offset=offset, scale=scale, icp_transform=icp_transform,
-            objects=objects, verbose=False, device=device
-        )
-        mesh_out = mesh_out[0] if isinstance(mesh_out, list) else mesh_out
-        mesh_pv = mesh_out if isinstance(mesh_out, pv.PolyData) else mesh_out.extract_geometry()
-        mesh_pv = mesh_pv.compute_normals(cell_normals=False, point_normals=True, inplace=False)
-        mesh_o3d = pv_to_o3d(mesh_pv)
-
-        for r in renderers:
-            r.scene.clear_geometry()
-            r.scene.add_geometry("mesh", mesh_o3d, material)
-
-        # Camera setup
-        pts = np.asarray(mesh_o3d.vertices)
-        center = pts.mean(axis=0)
-        r = np.linalg.norm(pts - center, axis=1).max()
-        distance = 2.5 * r
-        elevation = np.deg2rad(30)
-
-        # Define 4 camera positions
-        angle_deg = (i /  (len(loop_sequence) - 1)) * 360 * n_rotations
-        angle_rad = np.deg2rad(angle_deg)
-        cam_positions = [
-            center + np.array([  # Top Left: rotating
-                distance * np.cos(angle_rad) * np.cos(elevation),
-                distance * np.sin(angle_rad) * np.cos(elevation),
-                distance * np.sin(elevation)
-            ]),
-            center + np.array([0, -distance, 0]),  # Top Right: side
-            center + np.array([distance, 0, 0]),  # Bottom Left: back (90° CCW from side)
-            center + np.array([0, 0, distance])    # Bottom Right: top-down (90° CCW from side)
-        ]
-        ups = [
-            [0, 0, 1],  # rotating
-            [1, 0, 0],  # front
-            [0, 0, 1],  # side
-            [0, 1, 0],  # top-down
-        ]
-
-        for idx, (rdr, pos, up) in enumerate(zip(renderers, cam_positions, ups)):
-            rdr.setup_camera(60, center, pos, up)
-
-        # Render images
-        imgs = [np.asarray(r.render_to_image()) for r in renderers]
-        imgs_bgr = [cv2.cvtColor(img, cv2.COLOR_RGB2BGR) for img in imgs]
-
-        # Compose 4 views into 2x2 grid (width=640, height=480)
-        top = np.hstack([imgs_bgr[0], imgs_bgr[1]])
-        bottom = np.hstack([imgs_bgr[2], imgs_bgr[3]])
-        combined = np.vstack([top, bottom])
-
+        # Generate and render mesh
+        mesh_o3d = generate_and_render_mesh(latent_code, loop_sequence_names, loop_sequence, i, 
+                                            device, model, n_pts_per_axis, voxel_origin, voxel_size, 
+                                            offset, scale, icp_transform, objects, generated_mesh_count)
+        # Render views of model for video
+        combined = render_cameras(renderers, mesh_o3d, i, material, loop_sequence, n_rotations)
         # Overlay specimen name info onto each frame
-        specimen_name = loop_sequence_names[i]
-        parts = specimen_name.split("_")
-        family = parts[0] if len(parts) > 0 else specimen_name
-        genus = parts[1]  if len(parts) > 1 else ""
-        region = parts[-1] if len(parts) > 2 else ""
-        if 'C' in region:
-            reg_full = 'Cervical'
-        elif 'T' in region:
-            reg_full = 'Thoracic'
-        elif 'L' in region:
-            reg_full = 'Lumbar'
-        else:
-            reg_full = ''
-        text = f"Closest Specimen: \n{family}\n{genus}\n{reg_full}"
-        # Text settings
-        font = cv2.FONT_HERSHEY_SIMPLEX
-        font_scale = 0.7
-        font_color = (255, 255, 255)  # White
-        thickness = 2
-        text_size, _ = cv2.getTextSize(text, font, font_scale, thickness)
-        # Position: center of the frame
-        center_x = combined.shape[1] // 2
-        center_y = combined.shape[0] // 2
-        text_x = center_x - 120
-        text_y = center_y
-        # Put the text
-        for j, line in enumerate(text.split("\n")):
-                y = text_y + j * (text_size[1] + 10)
-                cv2.putText(combined, line, (text_x, y), font, font_scale, font_color, thickness, cv2.LINE_AA)
-
+        combined = overlay_text_on_frame(combined, i, loop_sequence_names)
+        # Write video
         out_video.write(combined)
         print(f"Captured frame {i + 1}/{len(loop_sequence)}")
-
     except Exception as e:
         print(f"Error at frame {i}: {e}")
     finally:
@@ -284,6 +172,5 @@ for i, latent_code in enumerate(loop_sequence):
             if var in locals():
                 del locals()[var]
         gc.collect()
-
 out_video.release()
 print("Video saved as", video_path)
