@@ -1,6 +1,9 @@
 # Helper functions for latent space exploration videos and figures
-
+import os
+import matplotlib.pyplot as plt
 import numpy as np
+from scipy.spatial import cKDTree
+
 
 # Sample latent grid aross num_x and num_y values - Isomap
 def sample_latent_grid(latent_2d, num_x, num_y):
@@ -38,3 +41,56 @@ def interpolate_latent_loop(latents, steps_per_segment=10):
             interp = (1 - t) * start + t * end
             loop_latents.append(interp)
     return np.array(loop_latents)
+
+def resample_by_cumulative_distance(latents, n_frames):
+    diffs = np.linalg.norm(np.diff(latents, axis=0), axis=1)
+    dists = np.concatenate([[0], np.cumsum(diffs)])
+    dists /= dists[-1]  # Normalize to [0, 1]
+    new_steps = np.linspace(0, 1, n_frames)
+    new_latents = np.array([
+        np.interp(new_steps, dists, latents[:, i]) for i in range(latents.shape[1])]).T
+    return new_latents
+
+def project_to_isomap(latents_query, latents_all, isomap_2d):
+    tree = cKDTree(latents_all)
+    _, indices = tree.query(latents_query, k=1)
+    return isomap_2d[indices], indices
+
+def plot_latent_paths(isomap_2d, loop_2d, tsp_2d, smooth_loop_2d, sampled_points, vertebral_regions, use_averages=False, save_dir="."):
+    # Plot settings
+    line_width = 2
+    alpha = 0.7
+    start_marker_size = 50
+    end_marker_size = 50
+    path_dict = {"loop": {"data": loop_2d, "color": "violet", "title": "Latent Interpolation Path"},
+                "tsp": {"data": tsp_2d, "color": "olivedrab", "title": "TSP-Ordered Path"},
+                "smooth": {"data": smooth_loop_2d, "color": "deepskyblue", "title": "Smoothed TSP Path"}}
+    # Create subplots
+    fig, axs = plt.subplots(1, 3, figsize=(18, 6), sharex=True, sharey=True)
+    for ax, (key, path_info) in zip(axs, path_dict.items()):
+        path = path_info["data"]
+        color = path_info["color"]
+        title = path_info["title"]
+        ax.set_title(title)
+        ax.scatter(isomap_2d[:, 0], isomap_2d[:, 1], c='lightgray', marker='o', s=10, label='All codes')
+        ax.scatter(sampled_points[:, 0], sampled_points[:, 1], marker='x', s=20, color='dimgrey', label='Sample Grid')
+        # Path line
+        ax.plot(path[:, 0], path[:, 1], '-', lw=line_width, color=color, alpha=alpha, label=f'Path ({key})')
+        # Start and end points
+        ax.scatter(*path[0], color=color, edgecolor='black', marker='o', s=start_marker_size, alpha=alpha, label='Start')
+        ax.scatter(*path[-1], color=color, edgecolor='black', marker='X', s=end_marker_size, alpha=alpha, label='End')
+        ax.set_aspect('equal', adjustable='box')
+    # Legend on the last subplot
+    axs[-1].legend(loc='center left', bbox_to_anchor=(1, 0.5), borderaxespad=0.0, fontsize='small')
+    # Title and save
+    plt.suptitle("Latent Interpolation Paths in Isomap 2D", fontsize=16)
+    plt.tight_layout(rect=[0, 0, 0.92, 0.95])
+    # Save figure
+    figpath = os.path.join(save_dir, f"latent_space_path_overlay_isomap_video_{'_'.join(vertebral_regions)}") # TO DO: define file path
+    if use_averages == True:
+        figpath = figpath + '_avg' + '.png'
+    else:
+        figpath = figpath + '.png'
+    plt.savefig(figpath, dpi=300, bbox_inches='tight')
+    plt.close()
+    print(f"\033[92mSaved latent space path overlay to {figpath}\033[0m")
