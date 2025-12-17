@@ -9,6 +9,11 @@ import pymskt.mesh.meshes as meshes
 import torch.nn.functional as F
 import cv2
 from NSM.mesh import create_mesh
+import colorsys
+from collections import defaultdict
+import matplotlib.pyplot as plt
+import matplotlib.patches as mpatches
+
 
 # ICP transform
 class NumpyTransform:
@@ -144,6 +149,45 @@ def decode_sdf(decoder, latent_vector, queries, device='cuda'):
     return decoder(inputs)
 # end monkey patch
 
+def parse_labels_from_filepaths(filepaths, regex_pattern=r"^(?P<species>[\w\s\-]+)[\-_ ]+[\w\d]+[\-_ ]+(?P<vertebra>[CTL]?\d+)", show_debug=False):
+    r_p = re.compile(regex_pattern, re.IGNORECASE)
+    labels = []
+    unmatched_files = []
+    matched_examples = []
+    for f in filepaths:
+        fname = os.path.basename(f)
+        match = r_p.match(fname)
+        if match:
+            species = match.group("species").strip()
+            vertebra = match.group("vertebra").strip()
+            labels.append((species, vertebra))
+            if len(matched_examples) < 1:
+                matched_examples.append(fname)
+        else:
+            labels.append((None, None))
+            unmatched_files.append(fname)
+            print(f"\033[31mFile unmatched by regex: {fname}\033[0m")
+    print(f"Extracted labels for {len(labels)} out of {len(filepaths)} files.")
+    
+    # --- Optional debug output ---
+    if show_debug:
+        print("\nRegex pattern used:")
+        print(f"  {regex_pattern}")
+        if matched_examples:
+            print("\nExample MATCH:")
+            print(f"  ✓ {matched_examples[0]}")
+        else:
+            print("\nExample MATCH:")
+            print("  (none found)")
+        if unmatched_files:
+            print("\nExample NON-MATCH:")
+            print(f"  ✗ {unmatched_files[0]}")
+        else:
+            print("\nExample NON-MATCH:")
+            print("  (none found)")
+        print(f"\nTotal unmatched files: {len(unmatched_files)}")
+    return labels, unmatched_files
+
 # Get species name using regex from filenames (ex: Scincidae_Tribolonotus_novaeguineae)
 def extract_species_prefix(filename):
     match = re.match(r"([A-Za-z]+_[A-Za-z]+_[a-z]+)", filename.lower())
@@ -239,7 +283,6 @@ def render_cameras(renderers, mesh_o3d, i, material, loop_sequence, n_rotations)
             [1, 0, 0],  # front
             [0, 0, 1],  # side
             [0, 1, 0],]  # top-down
-
     # Define other camera positions (side, top-down, etc.)
     for idx, (rdr, pos, up) in enumerate(zip(renderers, cam_positions, ups)):
         rdr.setup_camera(60, center, pos, up)
@@ -258,15 +301,36 @@ def generate_and_render_mesh(latent_code, loop_sequence_names, loop_sequence, i,
     print(f"\033[92m\nGenerating mesh {generated_mesh_count}/{len(loop_sequence)}\033[0m")
     print(f"Frame {i}: Closest to {loop_sequence_names[i]}")
     new_latent = torch.tensor(latent_code, dtype=torch.float32).unsqueeze(0).to(device)
-
     mesh_out = create_mesh(
             decoder=model, latent_vector=new_latent, n_pts_per_axis=n_pts_per_axis,
             voxel_origin=voxel_origin, voxel_size=voxel_size, path_original_mesh=None,
             offset=offset, scale=scale, icp_transform=icp_transform,
             objects=objects, verbose=False, device=device)
-        
     mesh_out = mesh_out[0] if isinstance(mesh_out, list) else mesh_out
     mesh_pv = mesh_out if isinstance(mesh_out, pv.PolyData) else mesh_out.extract_geometry()
     mesh_pv = mesh_pv.compute_normals(cell_normals=False, point_normals=True, inplace=False)
     mesh_o3d = pv_to_o3d(mesh_pv)
     return mesh_o3d
+    
+# Define the vertebra_sort_key function for vertebrae sorting based on region and position
+def vertebra_sort_key(item):
+    # Define the region order: C < T < L
+    region_order = {'C': 0, 'T': 1, 'L': 2}
+    vertebra_label = item[0]  # Extract vertebra label (e.g., C4, T1, L2)
+    region = vertebra_label[0].upper()  # Extract the region (C, T, L)
+    try:
+        number = int(vertebra_label[1:])  # Extract the numeric part and convert to integer
+    except ValueError:
+        number = float('inf')  # In case of malformed labels, put them at the end
+    # Return a tuple with region order and the numeric value for sorting
+    return (region_order.get(region, 200), number)
+
+# Function to classify vertebrae by region
+def get_region(vertebra_label):
+    if vertebra_label.startswith('c') or vertebra_label.startswith('C'):
+        return 'Cervical'
+    elif vertebra_label.startswith('t') or vertebra_label.startswith('T'):
+        return 'Thoracic'
+    elif vertebra_label.startswith('l') or vertebra_label.startswith('L'):
+        return 'Lumbar'
+    return 'Unknown'
