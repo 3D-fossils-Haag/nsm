@@ -270,7 +270,7 @@ def render_cameras(renderers, mesh_o3d, i, material, loop_sequence, n_rotations)
     distance = 2.5 * r
     elevation = np.deg2rad(30)
     # Define 4 camera positions
-    angle_deg = (i /  (len(loop_sequence) - 1)) * 360 * n_rotations
+    angle_deg = (i /  loop_sequence) * 360 * n_rotations
     angle_rad = np.deg2rad(angle_deg)
     cam_positions = [center + np.array([  # Top Left: rotating
                     distance * np.cos(angle_rad) * np.cos(elevation),
@@ -280,7 +280,7 @@ def render_cameras(renderers, mesh_o3d, i, material, loop_sequence, n_rotations)
                     center + np.array([distance, 0, 0]),  # Bottom Left: back (90° CCW from side)
                     center + np.array([0, 0, distance])]    # Bottom Right: top-down (90° CCW from side)
     ups = [[0, 0, 1],  # rotating
-            [1, 0, 0],  # front
+            [0, 0, 1],  # front
             [0, 0, 1],  # side
             [0, 1, 0],]  # top-down
     # Define other camera positions (side, top-down, etc.)
@@ -295,11 +295,13 @@ def render_cameras(renderers, mesh_o3d, i, material, loop_sequence, n_rotations)
     combined = np.vstack([top, bottom])
     return combined
 
-def generate_and_render_mesh(latent_code, loop_sequence_names, loop_sequence, i, device, model, n_pts_per_axis,
-                             voxel_origin, voxel_size, offset, scale, icp_transform, objects, generated_mesh_count):
+def generate_and_render_mesh(latent_code, loop_sequence, i, device, model, n_pts_per_axis,
+                             voxel_origin, voxel_size, offset, scale, icp_transform, objects, generated_mesh_count,
+                             loop_sequence_names=None):
     generated_mesh_count += 1
-    print(f"\033[92m\nGenerating mesh {generated_mesh_count}/{len(loop_sequence)}\033[0m")
-    print(f"Frame {i}: Closest to {loop_sequence_names[i]}")
+    print(f"\033[92m\nGenerating mesh {generated_mesh_count}/{loop_sequence}\033[0m")
+    if loop_sequence_names is not None:
+        print(f"Frame {i}: Closest to {loop_sequence_names[i]}")
     new_latent = torch.tensor(latent_code, dtype=torch.float32).unsqueeze(0).to(device)
     mesh_out = create_mesh(
             decoder=model, latent_vector=new_latent, n_pts_per_axis=n_pts_per_axis,

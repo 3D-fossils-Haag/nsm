@@ -94,3 +94,36 @@ def plot_latent_paths(isomap_2d, loop_2d, tsp_2d, smooth_loop_2d, sampled_points
     plt.savefig(figpath, dpi=300, bbox_inches='tight')
     plt.close()
     print(f"\033[92mSaved latent space path overlay to {figpath}\033[0m")
+
+def generate_latent_path_plot(projections, proj_val, min_proj, max_proj, width=200, height=80):
+    print(f"projections shape: {projections.shape}")
+    print(f"proj_val: {proj_val}")
+    # Ensure projections is a 1D array
+    projections = projections.flatten()
+    # Plot latent points
+    fig, ax = plt.subplots(figsize=(width / 100, height / 100), dpi=200)
+    # Set the background color to black
+    fig.patch.set_facecolor('black')  # Black background for the figure
+    ax.set_facecolor('black')  # Black background for the axes
+    # Plot latent points
+    ax.set_xlim(min_proj, max_proj)
+    ax.plot([min_proj, max_proj], [0, 0], color='paleturquoise', alpha=0.2, linewidth=1)
+    # Plot the current latent point (use proj_val directly and ensure it's scalar)
+    ax.scatter(proj_val, 0, color='deeppink', s=10)
+    # Customize the plot
+    ax.set_yticks([])  # Hide y-axis ticks
+    ax.set_xticks([0])
+    ax.set_xticklabels(['0'])
+    ax.grid(False)
+    ax.legend().set_visible(False)
+    for spine in ax.spines.values():
+        spine.set_visible(False)
+    ax.set_title(f"Latent Path (PC{str((PC_idx+1))})", fontsize=10, color='white')
+    plt.tight_layout()
+    buf = io.BytesIO()
+    plt.savefig(buf, format='png', transparent=False)
+    plt.close(fig)
+    buf.seek(0)
+    img = Image.open(buf)
+    img_np = np.array(img)[..., :3]  # Drop alpha if any
+    return img_np
