@@ -1,6 +1,7 @@
 # Helpers for plotting PC's
 import matplotlib.pyplot as plt
 import numpy as np
+import pandas as pd
 import os
 from collections import defaultdict
 from scipy.signal import savgol_filter
@@ -165,7 +166,7 @@ life_history_info = {
     '2': {
         'species_keywords': ['eryx', 'homalopsis', 'aniolios'], # antibody/upside down y
         'life_history': 'Snake',
-        'color': (0.60, 0.50, 0.46)},  # slate dirty carrot
+        'color': (0.25, 0.22, 0.2)},  # slate dirty carrot
     'o': {
         'species_keywords': [],  # circle (default) # Saxicolous/rock dwelling is the default
         'life_history': 'Saxicolous',
@@ -330,7 +331,7 @@ def plot_overall_avg_std(ax, trajs, grid, avg_color='black', fill_alpha=0.2):
     ax.plot(grid, avg, color=avg_color, linewidth=2, label='Average Trajectory')
     ax.fill_between(grid, avg - std, avg + std, color=avg_color, alpha=fill_alpha, label='±1 SD')
 
-def plot_grouped_by_lifehistory(ax, trajs, markers_list, life_history_info, species_colors, grid=grid,
+def plot_grouped_by_lifehistory(ax, trajs, markers_list, life_history_info=None, species_colors=None, grid=grid,
                                 peaks_and_valleys=False, show_region_boundaries=False,
                                 avg_cervical=None, avg_thoracic=None, plt_std=False):
     groups = defaultdict(list)
@@ -341,8 +342,10 @@ def plot_grouped_by_lifehistory(ax, trajs, markers_list, life_history_info, spec
         if arr.size == 0:
             continue
         avg_y = np.nanmean(arr, axis=0)
-        color = life_history_info.get(marker, {}).get('color') if life_history_info else None
-        if color is None:
+
+        if life_history_info is not None:
+            color = life_history_info.get(marker, {}).get('color')
+        else:
             color = (0.60, 0.50, 0.46)
         if peaks_and_valleys:
             safe_avg = np.nan_to_num(avg_y, nan=0.0, posinf=0.0, neginf=0.0)
@@ -383,15 +386,15 @@ def plot_species_groups(normalized_species_groups, pca, PC_idx=0, life_history_i
         if interp_series is None or grid is None:
             raise ValueError("plt_avg_std=True requires interp_series and grid.")
         grid = np.asarray(grid)
-        trajs, species_list, markers_list = compute_interpolated_trajs(normalized_species_groups, interp_series, grid, transform_pc1)
-        # if group_by_life_hist True we will draw group averages later; still optionally show faint per-species
+        trajs, species_list, markers_list = compute_interpolated_trajs(normalized_species_groups, grid, interp_series, transform_pc1)
         if group_by_life_hist:
             for i, s in enumerate(species_list):
                 y = trajs[i]
                 if np.all(np.isnan(y)):
                     continue
-                color = life_history_info.get(markers_list[i], {}).get('color') if life_history_info else None
-                if color is None:
+                if life_history_info: 
+                    color = life_history_info.get(markers_list[i], {}).get('color')
+                else:
                     color = (0.60, 0.50, 0.46)
                 ax.plot(grid, y, '-', alpha=0.15, color=color)
         plot_overall_avg_std(ax, trajs, grid)
@@ -400,10 +403,10 @@ def plot_species_groups(normalized_species_groups, pca, PC_idx=0, life_history_i
     if group_by_life_hist:
         if interp_series is None or grid is None:
             raise ValueError("group_by_life_hist=True requires interp_series and grid.")
-        trajs, species_list, markers_list = compute_interpolated_trajs(normalized_species_groups, interp_series, grid, transform_pc1)
+        trajs, species_list, markers_list = compute_interpolated_trajs(normalized_species_groups, grid, interp_series, transform_pc1)
         plot_grouped_by_lifehistory(
-            ax, trajs, markers_list, grid,
-            life_history_info, species_colors,
+            ax, trajs, markers_list, grid=grid,
+            life_history_info=life_history_info, species_colors=species_colors,
             peaks_and_valleys=peaks_and_valleys,
             show_region_boundaries=show_region_boundaries,
             avg_thoracic=avg_thoracic, avg_cervical=avg_cervical,
@@ -424,6 +427,7 @@ def plot_species_groups(normalized_species_groups, pca, PC_idx=0, life_history_i
     if show:
         plt.show()
     return fig, ax
+
 
 # helper legend (unchanged)
 def _build_legend_handles(life_history_info):
