@@ -6,49 +6,16 @@ from NSM.models import TriplanarDecoder
 import matplotlib.pyplot as plt
 import io
 from PIL import Image
-from NSM.helper_funcs import NumpyTransform, pv_to_o3d, load_config, load_model_and_latents
+from NSM.helper_funcs import NumpyTransform, pv_to_o3d, load_config, load_model_and_latents, render_cameras, generate_and_render_mesh
+from NSM.traverse_latents import generate_latent_path_plot
 
 # Define PC index and model checkpoint to use for video generation
-TRAIN_DIR = "run_v41" # TO DO: Choose training directory containing model ckpt and latent codes
+TRAIN_DIR = "run_v47" # TO DO: Choose training directory containing model ckpt and latent codes
 os.chdir(TRAIN_DIR)
 PC_idx = 0   # TO DO: Choose PC index for PC of interest (ex: For PC1, choose 0)
-CKPT = '1000' # TO DO: Choose the ckpt value you want to analyze results for
+CKPT = '2000' # TO DO: Choose the ckpt value you want to analyze results for
 LC_PATH = 'latent_codes' + '/' + CKPT + '.pth'
 MODEL_PATH = 'model' + '/' + CKPT + '.pth'
-
-# Define functions
-def generate_latent_path_plot(projections, proj_val, min_proj, max_proj, width=200, height=80):
-    print(f"projections shape: {projections.shape}")
-    print(f"proj_val: {proj_val}")
-    # Ensure projections is a 1D array
-    projections = projections.flatten()
-    # Plot latent points
-    fig, ax = plt.subplots(figsize=(width / 100, height / 100), dpi=200)
-    # Set the background color to black
-    fig.patch.set_facecolor('black')  # Black background for the figure
-    ax.set_facecolor('black')  # Black background for the axes
-    # Plot latent points
-    ax.set_xlim(min_proj, max_proj)
-    ax.plot([min_proj, max_proj], [0, 0], color='paleturquoise', alpha=0.2, linewidth=1)
-    # Plot the current latent point (use proj_val directly and ensure it's scalar)
-    ax.scatter(proj_val, 0, color='deeppink', s=10)
-    # Customize the plot
-    ax.set_yticks([])  # Hide y-axis ticks
-    ax.set_xticks([0])
-    ax.set_xticklabels(['0'])
-    ax.grid(False)
-    ax.legend().set_visible(False)
-    for spine in ax.spines.values():
-        spine.set_visible(False)
-    ax.set_title(f"Latent Path (PC{str((PC_idx+1))})", fontsize=10, color='white')
-    plt.tight_layout()
-    buf = io.BytesIO()
-    plt.savefig(buf, format='png', transparent=False)
-    plt.close(fig)
-    buf.seek(0)
-    img = Image.open(buf)
-    img_np = np.array(img)[..., :3]  # Drop alpha if any
-    return img_np
 
 # Load config
 config = load_config(config_path='model_params_config.json')
@@ -61,7 +28,7 @@ model, latent_ckpt, latent_codes = load_model_and_latents(MODEL_PATH, LC_PATH, c
 
 # Mesh creation params
 recon_grid_origin = 1.0
-n_pts_per_axis = 384
+n_pts_per_axis = 256
 voxel_origin = (-recon_grid_origin, -recon_grid_origin, -recon_grid_origin)
 voxel_size = (recon_grid_origin * 2) / (n_pts_per_axis - 1)
 offset = np.array([0.0, 0.0, 0.0])
@@ -112,82 +79,34 @@ fps = 15
 out_video = cv2.VideoWriter(video_path, cv2.VideoWriter_fourcc(*"mp4v"), fps, (width * 2, height * 2))
 
 # Loop through PC sweeps
+generated_mesh_count = 0
 for i, alpha in enumerate(alpha_vals):
     try:
         new_latent_np = center_sample + amplify * alpha * pc1
         new_latent = torch.tensor(new_latent_np, dtype=torch.float32).unsqueeze(0).to(device)
         # Compute PC1 projection for the latent space plot
         proj_val = np.dot(new_latent_np - latent_mean, pc1)
-
-        mesh_out = create_mesh(
-            decoder=model, latent_vector=new_latent, n_pts_per_axis=n_pts_per_axis,
-            voxel_origin=voxel_origin, voxel_size=voxel_size, path_original_mesh=None,
-            offset=offset, scale=scale, icp_transform=icp_transform,
-            objects=objects, verbose=False, device=device
-        )
-        mesh_out = mesh_out[0] if isinstance(mesh_out, list) else mesh_out
-        mesh_pv = mesh_out if isinstance(mesh_out, pv.PolyData) else mesh_out.extract_geometry()
-        mesh_pv = mesh_pv.compute_normals(cell_normals=False, point_normals=True, inplace=False)
-        mesh_o3d = pv_to_o3d(mesh_pv)
-
-        for r in renderers:
-            r.scene.clear_geometry()
-            r.scene.add_geometry("mesh", mesh_o3d, material)
-
-        # Camera setup
-        pts = np.asarray(mesh_o3d.vertices)
-        center = pts.mean(axis=0)
-        r = np.linalg.norm(pts - center, axis=1).max()
-        distance = 2.5 * r
-        elevation = np.deg2rad(30)
-
-        # Define 4 camera positions
-        angle_deg = (i / total_frames) * 360 * n_rotations
-        angle_rad = np.deg2rad(angle_deg)
-        cam_positions = [
-            center + np.array([  # Top Left: rotating
-                distance * np.cos(angle_rad) * np.cos(elevation),
-                distance * np.sin(angle_rad) * np.cos(elevation),
-                distance * np.sin(elevation)
-            ]),
-            center + np.array([0, -distance, 0]),  # Top Right: front
-            center + np.array([-distance, 0, 0]),  # Bottom Left: side (90° CCW from front)
-            center + np.array([0, 0, distance])    # Bottom Right: top-down (90° CCW from side)
-        ]
-        ups = [
-            [0, 0, 1],  # rotating
-            [0, 0, 1],  # front
-            [0, 0, 1],  # side
-            [0, 1, 0],  # top-down
-        ]
-
-        for idx, (rdr, pos, up) in enumerate(zip(renderers, cam_positions, ups)):
-            rdr.setup_camera(60, center, pos, up)
-
-        # Render images
-        imgs = [np.asarray(r.render_to_image()) for r in renderers]
-        imgs_bgr = [cv2.cvtColor(img, cv2.COLOR_RGB2BGR) for img in imgs]
-
+        # Generate and render mesh
+        mesh_o3d = generate_and_render_mesh(new_latent_np, total_frames, i, device, model, n_pts_per_axis, 
+                                            voxel_origin, voxel_size, offset, scale, icp_transform, objects, generated_mesh_count)
+        # Render views of model for video
+        combined = render_cameras(renderers, mesh_o3d, i, material, total_frames, n_rotations)
         # Generate latent path plot image
         latent_path_img = generate_latent_path_plot(projections, proj_val, min_proj, max_proj, width=200, height=80)
         latent_path_img_bgr = cv2.cvtColor(latent_path_img, cv2.COLOR_RGB2BGR)
-
-        # Compose 4 views into 2x2 grid (width=640, height=480)
-        top = np.hstack([imgs_bgr[0], imgs_bgr[1]])
-        bottom = np.hstack([imgs_bgr[2], imgs_bgr[3]])
-        combined = np.vstack([top, bottom])
 
         # Overlay latent_path_img in the middle of the 2x2 grid
         # Calculate overlay position (centered horizontally & vertically)
         center_x = combined.shape[1] // 2
         center_y = combined.shape[0] // 2
-
         h, w, _ = latent_path_img_bgr.shape
         x_start = center_x - w // 2
         y_start = center_y - h // 2
 
         # Add transparency by blending (optional, here full opaque)
         combined[y_start:y_start+h, x_start:x_start+w] = latent_path_img_bgr
+        
+        # Write video
         out_video.write(combined)
 
         print(f"Captured frame {i + 1}/{total_frames}")

@@ -15,7 +15,7 @@ from NSM.helper_funcs import NumpyTransform, pv_to_o3d, load_config, load_model_
 from NSM.traverse_latents import sample_latent_grid, solve_tsp_nearest_neighbor, interpolate_latent_loop, project_to_isomap, resample_by_cumulative_distance, plot_latent_paths
 
 # Define model parameters to use for video generation
-TRAIN_DIR = "run_v44" # TO DO: Choose training directory containing model ckpt and latent codes
+TRAIN_DIR = "run_v47" # TO DO: Choose training directory containing model ckpt and latent codes
 os.chdir(TRAIN_DIR)
 CKPT = '2000' # TO DO: Choose the ckpt value you want to analyze results for
 LC_PATH = 'latent_codes' + '/' + CKPT + '.pth'
@@ -155,11 +155,11 @@ loop_sequence_names = closest_specimens
 for i, latent_code in enumerate(loop_sequence):
     try:
         # Generate and render mesh
-        mesh_o3d = generate_and_render_mesh(latent_code, loop_sequence_names, loop_sequence, i, 
-                                            device, model, n_pts_per_axis, voxel_origin, voxel_size, 
-                                            offset, scale, icp_transform, objects, generated_mesh_count)
+        mesh_o3d = generate_and_render_mesh(latent_code, len(loop_sequence), i, device, model, n_pts_per_axis, 
+                                            voxel_origin, voxel_size, offset, scale, icp_transform, objects, 
+                                            generated_mesh_count, loop_sequence_names)
         # Render views of model for video
-        combined = render_cameras(renderers, mesh_o3d, i, material, loop_sequence, n_rotations)
+        combined = render_cameras(renderers, mesh_o3d, i, material, len(loop_sequence), n_rotations)
         # Overlay specimen name info onto each frame
         combined = overlay_text_on_frame(combined, i, loop_sequence_names)
         # Write video
