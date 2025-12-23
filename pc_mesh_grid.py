@@ -12,9 +12,9 @@ from NSM.models import TriplanarDecoder
 from NSM.helper_funcs import NumpyTransform, pv_to_o3d, load_config, load_model_and_latents
 
 # --- Configuration for the grid image ---
-TRAIN_DIR = "run_v41" # TO DO: Choose training directory containing model ckpt and latent codes
+TRAIN_DIR = "run_v47" # TO DO: Choose training directory containing model ckpt and latent codes
 os.chdir(TRAIN_DIR)
-CKPT = '1000' # TO DO: Choose the ckpt value you want to analyze results for
+CKPT = '2000' # TO DO: Choose the ckpt value you want to analyze results for
 LC_PATH = 'latent_codes' + '/' + CKPT + '.pth'
 MODEL_PATH = 'model' + '/' + CKPT + '.pth'
 NUM_STEPS_PC0 = 8
@@ -234,7 +234,7 @@ def main():
     else:
         print("\033[31mNo images were generated to create the grid.\033[0m")
     
-    del mdl, lc, ck2, L, scores, U, S_val, Vt, C, mu, ren
+    del mdl, ck2, L, scores, U, S_val, Vt, C, mu, ren
     gc.collect()
     if dev.startswith('cuda'):
         torch.cuda.empty_cache()
