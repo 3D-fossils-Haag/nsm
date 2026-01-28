@@ -26,6 +26,14 @@ pip install .
 
 # Usage
 
+## Demos
+Check out our demos to build NSM fully in the Google Colab runtime environment and interactively evaluate our tools with demo data in under 10 minutes, no need to connect to your Google Drive!
+
+:arrow_right: :lizard: [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/aubricot/nsm/blob/main/demos/classification_demo.ipynb) Click here to try out classification of unknown fossils.
+
+
+:arrow_right: :lizard: [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/aubricot/nsm/blob/main/demos/shape_completion_demo.ipynb) Click here to try out shape completion for partial fossils.
+
 ## Training
 Update sections of [train_model.py]() commented with # TO DO: to update PROJECT_NAME, ENTITY_NAME, RUN_NAME, folder_vtk, N_TRAIN, N_TEST, N_VAL. These variables point to where your data was collected, where it is saved, and where outputs should go. Adjust model training hyperparameters in [vertebrae_config.json](). See python script and config files for details and save before running using commands below. 
 ```
