@@ -228,7 +228,7 @@ for pm_path, gt_path in pairs[:20]:
     print(f"\033[32m\n=== Processing {os.path.basename(pm_path)} ===\033[0m")
     # Make a new dir to save predictions
     vert_fname = pm_path
-    outfpath = 'shape_completion/predictions/' + os.path.splitext(os.path.basename(vert_fname))[0] # TO DO: Adjust to desired outpath
+    outfpath = TRAIN_DIR + '/shape_completion/predictions/' + os.path.splitext(os.path.basename(vert_fname))[0] # TO DO: Adjust to desired outpath
     print("Making a new directory to save model predictions and outputs at: ", outfpath)
     os.makedirs(outfpath, exist_ok=True)
 
