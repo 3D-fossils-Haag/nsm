@@ -13,6 +13,18 @@ def load_ply(path):
     reader.Update()
     return reader.GetOutput()
 
+def load_polydata(path):
+    ext = os.path.splitext(path)[1].lower()
+    if ext == ".ply":
+        reader = vtk.vtkPLYReader()
+    elif ext == ".vtk":
+        reader = vtk.vtkPolyDataReader()
+    else:
+        raise ValueError(f"Unsupported mesh format: {ext}")
+    reader.SetFileName(path)
+    reader.Update()
+    return reader.GetOutput()
+
 def save_ply(polydata, path, binary=True):
     writer = vtk.vtkPLYWriter()
     writer.SetFileName(path)
@@ -45,9 +57,9 @@ def fast_subtract(original_pd, segment_pd, eps=0.0):
 
 def create_partial_mesh(original_ply, segment_ply, output_ply):
     print(f"  Loading original: {os.path.basename(original_ply)}")
-    original = clean_triangulate(load_ply(original_ply))
+    original = clean_triangulate(load_polydata(original_ply))
     print(f"  Loading segment: {os.path.basename(segment_ply)}")
-    segment  = clean_triangulate(load_ply(segment_ply))
+    segment  = clean_triangulate(load_polydata(segment_ply))
     print("  Subtracting via implicit distance clip (fast)...")
     partial = fast_subtract(original, segment, eps=0.0)
     print(f"  Original: {original.GetNumberOfPoints()} vertices")
@@ -58,9 +70,9 @@ def create_partial_mesh(original_ply, segment_ply, output_ply):
     return partial.GetNumberOfPoints()
 
 def create_validation_dataset(original_dir, segments_dir, output_dir, segment_to_remove=5):
-    # Create output directory for partial meshes only
+    # Create output directory for partial meshes
     partial_dir = os.path.join(output_dir, "partial_meshes")
-    os.makedirs(output_dir, exist_ok=True)
+    os.makedirs(partial_dir, exist_ok=True)
     # Find all segment files for the target segment
     segment_pattern = os.path.join(segments_dir, f"*_seg_{segment_to_remove:02d}.ply")
     segment_files = glob(segment_pattern)
@@ -77,8 +89,13 @@ def create_validation_dataset(original_dir, segments_dir, output_dir, segment_to
         # Find corresponding original mesh (ground truth)
         original_ply = os.path.join(original_dir, f"{base_name}.ply")
         if not os.path.exists(original_ply):
-            print(f"  ✗ Original mesh not found: {original_ply}")
-            continue
+            vtk_path = os.path.join(original_dir, f"{base_name}.vtk")
+            if os.path.exists(vtk_path):
+                original_ply = vtk_path
+            else:
+                print(f"Original mesh not found: {base_name}.ply or .vtk")
+                continue
+
         try:
             # Create partial mesh
             partial_path = os.path.join(partial_dir, f"{base_name}_partial.ply")
