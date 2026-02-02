@@ -18,16 +18,17 @@ from NSM.mesh import create_mesh
 import vtk
 import re
 import random
-from NSM.helper_funcs import NumpyTransform, load_config, load_model_and_latents, convert_ply_to_vtk, get_sdfs, fixed_point_coords, safe_load_mesh_scalars, extract_species_prefix
-from NSM.optimization import pca_initialize_latent, get_top_k_pcs, find_similar, find_similar_cos
+from pathlib import Path
+from NSM.helper_funcs import NumpyTransform, load_config, load_model_and_latents, convert_ply_to_vtk, get_sdfs, fixed_point_coords, safe_load_mesh_scalars, extract_species_prefix, parse_labels_from_filepaths
+from NSM.optimization import pca_initialize_latent, get_top_k_pcs, find_similar, find_similar_cos, optimize_latent
 # Monkey Patch into pymskt.mesh.meshes.Mesh
 meshes.Mesh.load_mesh_scalars = safe_load_mesh_scalars
 meshes.Mesh.point_coords = property(fixed_point_coords)
 
 # Define PC index and model checkpoint to use for analysis of novel mdeshes
-TRAIN_DIR = "run_v41" # TO DO: Choose training directory containing model ckpt and latent codes
+TRAIN_DIR = "run_v56" # TO DO: Choose training directory containing model ckpt and latent codes
 os.chdir(TRAIN_DIR)
-CKPT = '1000' # TO DO: Choose the ckpt value you want to analyze results for
+CKPT = '3000' # TO DO: Choose the ckpt value you want to analyze results for
 LC_PATH = 'latent_codes' + '/' + CKPT + '.pth'
 MODEL_PATH = 'model' + '/' + CKPT + '.pth'
 
@@ -41,25 +42,29 @@ all_vtk_files = [os.path.basename(f) for f in train_paths]
 # Randomly select test paths
 mesh_list = random.sample(config['val_paths'], 100) # TO DO: Choose val or test paths
 
-# Define functions
+# Define predictions
 
-# Optimie latent vector for inference (since DeepSDF has no encoder, this is how you run novel data through for inference)
-def optimize_latent(decoder, points, sdf_vals, latent_size, iters=1000, lr=1e-3):
-    init_latent_torch = pca_initialize_latent(mean_latent, latent_codes, top_k=top_k_reg) # initialize near mean using PCAs for regularization
-    latent = init_latent_torch.clone().detach().requires_grad_()
-    optimizer = torch.optim.Adam([latent], lr=lr)
-    sdf_vals = sdf_vals.to(device)
-    decoder = decoder.to(device)
-    points = points.to(device)
-    for i in range(iters):
-        optimizer.zero_grad()
-        pred_sdf = get_sdfs(decoder, points, latent)
-        loss = F.l1_loss(pred_sdf.squeeze(), sdf_vals)
-        loss.backward()
-        optimizer.step()
-        if i % 200 == 0 or i == iters - 1:
-            print(f"[{i}/{iters}] Loss: {loss.item():.6f}")
-    return latent.detach().to(device)
+def plot_predictions(dim_reduced_coords, similar_coords, novel_coord, filepaths, out_fn):
+        plt.figure(figsize=(8, 6))
+        plt.scatter(dim_reduced_coords[:, 0], dim_reduced_coords[:, 1], color='gray', alpha=0.3, label='Training Meshes')
+        # Plot most similar (1st one) in pink
+        plt.scatter(similar_coords[0, 0], similar_coords[0, 1], color='hotpink', s=80, label='Most Similar')
+        # Plot next 4 similar in blue
+        if len(similar_coords) > 1:
+            plt.scatter(similar_coords[1:, 0], similar_coords[1:, 1], color='blue', s=60, label='Other Top-5 Similar')
+        # Plot novel mesh in red
+        plt.scatter(*novel_coord, color='red', s=80, label='Novel Mesh')
+        # Aannotate each of the top-5 similar meshes
+        for idx, (x, y) in zip(similar_ids, similar_coords):
+            plt.text(x, y, filepaths[idx].split('.')[0], fontsize=6, color='black')
+        plt.title("Latent Space Visualization (PCA)")
+        plt.xlabel("Component 1")
+        plt.ylabel("Component 2")
+        plt.legend()
+        plt.grid(True)
+        plt.tight_layout()
+        plt.savefig(outfpath + "/" + out_fn, dpi=300)
+        plt.close()
 
 # Load model and latent codes
 model, latent_ckpt, latent_codes = load_model_and_latents(MODEL_PATH, LC_PATH, config, device)
@@ -68,7 +73,7 @@ _, top_k_reg = get_top_k_pcs(latent_codes, threshold=0.95)
 
 # Loop through meshes
 summary_log = []
-for i, vert_fname in enumerate(mesh_list):    
+for i, vert_fname in enumerate(mesh_list): 
     print(f"\033[32m\n=== Processing {os.path.basename(vert_fname)} ===\033[0m")
     print(f"\033[32m\n=== Mesh {i} / {len(mesh_list)} ===\033[0m")
     # Make a new dir to save predictions
@@ -113,7 +118,7 @@ for i, vert_fname in enumerate(mesh_list):
 
     # Optimize latents (DeepSDF has no encoder, so must use optimization to encode novel data)
     print("Optimizing latents")
-    latent_novel = optimize_latent(model, points, sdf_vals, config['latent_size'])
+    latent_novel = optimize_latent(model, points, sdf_vals, config['latent_size'], top_k_reg, mean_latent, latent_codes)
     print("Translated novel mesh into latent space!")
 
     # --- Classify vertebra ---
@@ -141,28 +146,7 @@ for i, vert_fname in enumerate(mesh_list):
     coords_2d = pca.fit_transform(latents)
     novel_coord = pca.transform(latent_novel.cpu().numpy())[0]
     similar_coords = coords_2d[similar_ids]
-    
-    # Plotting
-    plt.figure(figsize=(8, 6))
-    plt.scatter(coords_2d[:, 0], coords_2d[:, 1], color='gray', alpha=0.3, label='Training Meshes')
-    # Plot most similar (1st one) in pink
-    plt.scatter(similar_coords[0, 0], similar_coords[0, 1], color='hotpink', s=80, label='Most Similar')
-    # Plot next 4 similar in blue
-    if len(similar_coords) > 1:
-        plt.scatter(similar_coords[1:, 0], similar_coords[1:, 1], color='blue', s=60, label='Other Top-5 Similar')
-    # Plot novel mesh in red
-    plt.scatter(*novel_coord, color='red', s=80, label='Novel Mesh')
-    # Aannotate each of the top-5 similar meshes
-    for idx, (x, y) in zip(similar_ids, similar_coords):
-        plt.text(x, y, all_vtk_files[idx].split('.')[0], fontsize=6, color='black')
-    plt.title("Latent Space Visualization (PCA)")
-    plt.xlabel("Component 1")
-    plt.ylabel("Component 2")
-    plt.legend()
-    plt.grid(True)
-    plt.tight_layout()
-    plt.savefig(outfpath + "/latent_space_pca_pca_regularized_95pct_cos.png", dpi=300)
-    plt.close()
+    plot_predictions(coords_2d, similar_coords, novel_coord, all_vtk_files, out_fn="latent_space_pca_pca_regularized_95pct_cos.png")
 
     # t-SNE Plot
     # Data loading
@@ -173,28 +157,7 @@ for i, vert_fname in enumerate(mesh_list):
     train_coords = coords_with_novel[:-1]
     novel_coord = coords_with_novel[-1]
     similar_coords = train_coords[similar_ids]
-    
-    # Plotting
-    plt.figure(figsize=(8, 6))
-    plt.scatter(train_coords[:, 0], train_coords[:, 1], color='grey', alpha=0.1, label='Training Meshes')
-    # Plot most similar (1st one) in pink
-    plt.scatter(similar_coords[0, 0], similar_coords[0, 1], color='hotpink', alpha=0.5, label='Most Similar')
-    # Plot next 4 similar in blue
-    if len(similar_coords) > 1:
-        plt.scatter(similar_coords[1:, 0], similar_coords[1:, 1], color='blue', alpha=0.5, label='Other Top-5 Similar')
-    # Plot novel mesh in red
-    plt.scatter(*novel_coord, color='red', alpha=0.5, label='Novel Mesh')
-    # Annotate each of the top-5 similar meshes
-    for idx, (x, y) in zip(similar_ids, similar_coords):
-        plt.text(x, y, all_vtk_files[idx].split('.')[0], fontsize=6, color='black')
-    plt.title("Latent Space Visualization (t-SNE)")
-    plt.xlabel("Component 1")
-    plt.ylabel("Component 2")
-    plt.legend()
-    plt.grid(True)
-    plt.tight_layout()
-    plt.savefig(outfpath + "/latent_space_tsne_pca_regularized_95pct_cos.png", dpi=300)
-    plt.close()
+    plot_predictions(train_coords, similar_coords, novel_coord, all_vtk_files, "latent_space_tsne_pca_regularized_95pct_cos.png")
 
     # --- Reconstruct optimized latent into mesh to confirm it looks normal ---
     
@@ -239,20 +202,42 @@ for i, vert_fname in enumerate(mesh_list):
 
     # Save results to summary log
     # Get species prefix
-    mesh_species = extract_species_prefix(os.path.basename(vert_fname))
+    labels, _ = parse_labels_from_filepaths([os.path.basename(vert_fname)])
+    gt_species, gt_position = labels[0]
+
     # Check top-1 match
-    similar_1_species = extract_species_prefix(all_vtk_files[similar_ids[0]])
-    species_match = "yes" if mesh_species and mesh_species == similar_1_species else "no"
+    labels, _ = parse_labels_from_filepaths([all_vtk_files[similar_ids[0]]])
+    top1_species_pred, top1_position_pred = labels[0]
+    top1_species_match = "yes" if gt_species and gt_species == top1_species_pred else "no"
+    top1_region_match = "yes" if gt_position and gt_position[0] == top1_position_pred[0] else "no"
+    if top1_region_match == "yes":
+        top1_position_error = abs(int(gt_position[1:]) - int(top1_position_pred[1:]))
+    else:
+        top1_position_error = "NA_region_mismatch"
+
     # Check top-5 matches
-    top5_match = any(extract_species_prefix(all_vtk_files[i]) == mesh_species
-                    for i in similar_ids)
-    top5_species_match = "yes" if top5_match else "no"
+    labels, _ = parse_labels_from_filepaths([all_vtk_files[i] for i in similar_ids])
+    top5_species_pred  = [s for s, _ in labels]
+    top5_position_pred = [v for _, v in labels]
+    top5_species_match = "yes" if (gt_species is not None and gt_species in top5_species_pred) else "no"
+    top5_region_match = "yes" if (gt_position is not None and any(pred[0].lower() == gt_position[0].lower() for pred in top5_position_pred)) else "no"
+    position_errors = []
+    if top5_region_match == "yes":
+        for pred in top5_position_pred:
+            if pred[0].lower() == gt_position[0].lower():
+                position_errors.append(abs(int(pred[1:]) - int(gt_position[1:])))
+    top5_position_error = min(position_errors) if position_errors else "NA_region_mismatch"
+
     # Prepare summary log with top-5
     top_k_summary = {
     "mesh": os.path.basename(vert_fname),
     "output_mesh": output_path,
-    "species_match": species_match,
-    "top5_species_match": top5_species_match,}
+    "top1_species_match": top1_species_match,
+    "top5_species_match": top5_species_match,
+    "top1_region_match": top1_region_match,
+    "top1_position_error": top1_position_error,
+    "top5_region_match": top5_region_match,
+    "top5_position_error": top5_position_error,}
     # Add top-5 similar mesh names and distances
     for rank, (i, dist) in enumerate(zip(similar_ids, distances), 1):
         top_k_summary[f"similar_{rank}_name"] = all_vtk_files[i]
