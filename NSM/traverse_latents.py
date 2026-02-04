@@ -3,7 +3,8 @@ import os
 import matplotlib.pyplot as plt
 import numpy as np
 from scipy.spatial import cKDTree
-
+import io 
+from PIL import Image
 
 # Sample latent grid aross num_x and num_y values - Isomap
 def sample_latent_grid(latent_2d, num_x, num_y):
@@ -95,7 +96,7 @@ def plot_latent_paths(isomap_2d, loop_2d, tsp_2d, smooth_loop_2d, sampled_points
     plt.close()
     print(f"\033[92mSaved latent space path overlay to {figpath}\033[0m")
 
-def generate_latent_path_plot(projections, proj_val, min_proj, max_proj, width=200, height=80):
+def generate_latent_path_plot(projections, proj_val, min_proj, max_proj, PC_idx, width=200, height=80):
     print(f"projections shape: {projections.shape}")
     print(f"proj_val: {proj_val}")
     # Ensure projections is a 1D array
