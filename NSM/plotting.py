@@ -10,6 +10,7 @@ from matplotlib.colors import is_color_like
 import matplotlib.patches as mpatches
 import colorsys
 from NSM.helper_funcs import get_region
+import json
 
 # Dictionary for species mapping to family, family-specific attributes, and colors
 family_info = {
@@ -145,7 +146,7 @@ life_history_info = {
         'color': (0.84, 0.65, 0.23)},  # dark mustard
     's': {
         'species_keywords': ['acontias', 'mochlus', 'rhineura', 'dibamus', 'lanthonotus', 
-                             'bipes', 'diplometopon', 'pseudopus'],  # square
+                             'bipes', 'diplometopon', 'pseudopus', 'amphisbaen', "bachia", "polychrous"],  # square
         'life_history': 'Burrowers',
         'color': (0.72, 0.44, 0.22)},  # dirty carrot
     'd': {
@@ -469,3 +470,120 @@ def plot_predictions(dim_reduced_coords, similar_ids, similar_coords, novel_coor
         plt.tight_layout()
         plt.savefig(outfpath + "/" + out_fn, dpi=300)
         plt.close()
+
+def match(species_name, sdf):
+    s = species_name.lower().strip().replace(' ', '_')
+    key = '_'.join(s.split('_')[:3])
+    hit = sdf[sdf.index.str.contains(key, regex=False)]
+    if hit.empty:
+        parts = s.split('_')
+        genus = parts[1] if len(parts) > 1 else parts[0]
+        hit = sdf[sdf.index.str.contains(f'_{genus}_', regex=False)]
+    return hit.iloc[0] if not hit.empty else None
+
+def get_marker(species_name, sdf):
+    row = match(species_name)
+    return row['marker'] if row is not None else 'o'
+
+def get_color(species_name, sdf):
+    row = match(species_name, sdf)
+    return row['color'] if row is not None else (0.5, 0.5, 0.5)
+
+def get_trait(species_name, sdf):
+    row = match(species_name)
+    return row['trait'] if row is not None else None
+
+# Function to plot the legend for life history strategies
+def plot_life_history_legend(legend_items, title='Symbol Key for Species Life History Strategies', outfpath=None):
+    # Create the figure and axis
+    fig, ax = plt.subplots(figsize=(6, 4))
+    # Plot dummy points for the legend
+    for i, (marker, label) in enumerate(legend_items):
+        ax.plot([], [], marker=marker, linestyle='None', markersize=10, label=label, color='black')
+    # Customize and display the legend
+    ax.legend(loc='center left', frameon=False)
+    ax.axis('off')
+    plt.title(title)
+    plt.tight_layout()
+    # Save the plot if an output file path is provided
+    if outfpath:
+        plt.savefig(outfpath, dpi=300, bbox_inches='tight')
+    # Show the plot
+    plt.show()
+
+# Function to generate the legend for family colors
+def plot_family_color_legend(family_colors):
+    # Create a list of patches and labels for the legend
+    patches = []
+    labels = []
+    for family, color in family_colors.items():
+        patch = mpatches.Patch(color=color, label=family)
+        patches.append(patch)
+        labels.append(family)
+    # Create the legend
+    plt.figure(figsize=(8, 6))
+    plt.legend(handles=patches, labels=labels, loc='center left', bbox_to_anchor=(1, 0.5), title="Family Colors")
+    plt.axis('off')  # Turn off the axis since we only want the legend
+    plt.show()
+    
+# Define a sort key that orders vertebrae by region (C < T < L) then by the numeric part.
+def sort_key(item):
+    region_order = {'C': 0, 'T': 1, 'L': 2}
+    v = item[0]
+    return (region_order.get(v[0], 99), int(v[1:]))
+
+def generate_species_cmap_gradient(family_base_colors, species_groups, sdf, max_shift=0.4):
+    species_colors = {}
+    family_species_map = defaultdict(list)
+    for species in species_groups:
+        row = match(species)
+        family = row['broad_taxon_for_plotting'] if row is not None else 'unknown'
+        family_species_map[family].append(species)
+    for family, species_list in family_species_map.items():
+        base_rgb = family_base_colors.get(family, np.array([0.7, 0.7, 0.7]))
+        base_hls = colorsys.rgb_to_hls(*base_rgb)
+        sorted_species = sorted(species_list)
+        n = len(sorted_species)
+        center_idx = n // 2
+        for i, sp in enumerate(sorted_species):
+            if i == center_idx:
+                new_rgb = base_rgb
+            else:
+                shift_direction = -1 if i < center_idx else 1
+                shift_amount = (abs(i - center_idx) / (n - 1)) * max_shift
+                new_lightness = np.clip(base_hls[1] + shift_direction * shift_amount, 0, 1)
+                new_rgb = colorsys.hls_to_rgb(base_hls[0], new_lightness, base_hls[2])
+            species_colors[sp] = tuple(np.clip(new_rgb, 0, 1)) + (1.0,)
+    return species_colors
+
+def trait_to_label(trait):
+    if pd.isna(trait):
+        return 'SNAKE'
+    overrides = {'grass-swimmer': 'GRASS SWIMMER', 'burrowing': 'BURROWER'}
+    return overrides.get(trait, trait.upper())
+
+# Convert matplotlib style colors to plotly
+def plotly_color(c):
+    if isinstance(c, tuple) and len(c) in (3, 4):
+        r, g, b = [int(255 * v) for v in c[:3]]
+        return f'rgb({r},{g},{b})'
+    return c
+
+# Load landmarks file (.mrk.json)
+def load_mrk_json(path):
+    with open(path, "r") as f:
+        data = json.load(f)
+    markups = data.get("markups", [])
+    if not markups:
+        raise ValueError(f"No 'markups' found in {path}")
+    control_points = markups[0].get("controlPoints", [])
+    points = []
+    labels = []
+    for cp in control_points:
+        pos = cp.get("position")
+        if pos is None:
+            continue
+        points.append(pos)
+        labels.append(cp.get("label"))
+    points = np.asarray(points, dtype=np.float32)
+    return points, labels
