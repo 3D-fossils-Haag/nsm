@@ -8,6 +8,7 @@ and launches one of:
   - hierarchy-aware DeepSDF training
 Usage:
     python train_model.py --run_name my_experiment
+    python train_model.py --run_name my_experiment --split_file downsample_splits/n300_diverse_seed52122.json
     python train_model.py --run_name my_experiment --contrastive_loss
     python train_model.py --run_name my_experiment --hierarchy_loss
 Arguments:
@@ -75,6 +76,8 @@ with open(path_config, 'r') as f:
 
 parser = argparse.ArgumentParser()
 parser.add_argument('--run_name', type=str, default='run_v57a', help='Run name used for saving model and SDF cache')
+parser.add_argument('--split_file', type=str, default=None, help='Optional JSON split file with list_mesh_paths, val_paths and test_paths')
+parser.add_argument('--mesh_dir', type=str, default='vertebrae_meshes', help='Mesh directory used when --split_file is not provided')
 loss_mode = parser.add_mutually_exclusive_group()
 loss_mode.add_argument("--contrastive_loss", action="store_true", help="Enable contrastive loss training loop.")
 loss_mode.add_argument("--hierarchy_loss", action="store_true", help="Enable hierarchy-aware loss training loop.")
@@ -122,32 +125,65 @@ if USE_WANDB is True:
     config['project_name'] = PROJECT_NAME
     config['entity_name'] = ENTITY_NAME
     config['entity'] = ENTITY_NAME
-    config['run_name'] = RUN_NAME
+
+config['run_name'] = RUN_NAME
 
 config['experiment_directory'] = os.path.abspath(LOC_SAVE_NEW_MODELS)
 
-# Get vertebrae mesh paths
-folder_vtk = os.path.abspath('vertebrae_meshes') # TO DO: change path
-all_vtk_files = [os.path.join(folder_vtk, f) for f in os.listdir(folder_vtk) if f.lower().endswith('.vtk')]
+def _abspath_list(paths, base_dir):
+    out = []
+    for path in paths:
+        out.append(path if os.path.isabs(path) else os.path.abspath(os.path.join(base_dir, path)))
+    return out
 
-# Calculate 80/15/5 train/test/val split
-total_files = len(all_vtk_files)
-N_TRAIN = int(0.8 * total_files) # TO DO
-N_TEST = int(0.15 * total_files) # TO DO
-N_VAL = total_files - N_TRAIN - N_TEST
 
-random.seed(42)
-random.shuffle(all_vtk_files) 
+if args.split_file:
+    split_path = os.path.abspath(args.split_file)
+    with open(split_path, 'r') as f:
+        split = json.load(f)
+    if split.get("skipped"):
+        raise ValueError(f"Split file is marked skipped: {split.get('skipped_reason')}")
+    split_base = os.path.dirname(split_path)
+    list_mesh_paths = sorted(_abspath_list(split["list_mesh_paths"], split_base))
+    list_val_paths = sorted(_abspath_list(split.get("val_paths", []), split_base))
+    list_test_paths = sorted(_abspath_list(split.get("test_paths", []), split_base))
+    config["split_file"] = split_path
+    config["split_name"] = split.get("name")
+    config["split_strategy"] = split.get("strategy")
+    config["requested_train_size"] = split.get("requested_train_size")
+    config["seed"] = int(split.get("seed", config["seed"]))
+    print(f"Loaded split file: {split_path}")
+else:
+    # Get vertebrae mesh paths
+    folder_vtk = os.path.abspath(args.mesh_dir) # TO DO: change path
+    all_vtk_files = [os.path.join(folder_vtk, f) for f in os.listdir(folder_vtk) if f.lower().endswith('.vtk')]
 
-if len(all_vtk_files) < N_TRAIN + N_VAL + N_TEST:
-    raise ValueError("Not enough .vtk files in vertebrae_meshes folder.")
-list_mesh_paths = sorted(all_vtk_files[:N_TRAIN])
-list_val_paths = sorted(all_vtk_files[N_TRAIN:N_TRAIN + N_VAL])
-list_test_paths = sorted(all_vtk_files[N_TRAIN + N_VAL:])
+    # Calculate 80/15/5 train/test/val split
+    total_files = len(all_vtk_files)
+    N_TRAIN = int(0.8 * total_files) # TO DO
+    N_TEST = int(0.15 * total_files) # TO DO
+    N_VAL = total_files - N_TRAIN - N_TEST
+
+    random.seed(config['seed'])
+    random.shuffle(all_vtk_files)
+
+    if len(all_vtk_files) < N_TRAIN + N_VAL + N_TEST:
+        raise ValueError(f"Not enough .vtk files in {folder_vtk}.")
+    list_mesh_paths = sorted(all_vtk_files[:N_TRAIN])
+    list_val_paths = sorted(all_vtk_files[N_TRAIN:N_TRAIN + N_VAL])
+    list_test_paths = sorted(all_vtk_files[N_TRAIN + N_VAL:])
 
 config['test_paths'] = list_test_paths
 config['val_paths'] = list_val_paths
 config['list_mesh_paths'] = list_mesh_paths
+
+missing_paths = [p for p in list_mesh_paths + list_val_paths + list_test_paths if not os.path.exists(p)]
+if missing_paths:
+    raise FileNotFoundError(f"Split references missing mesh files, first missing: {missing_paths[0]}")
+
+print(f"Training meshes: {len(list_mesh_paths)}")
+print(f"Validation meshes: {len(list_val_paths)}")
+print(f"Test meshes: {len(list_test_paths)}")
 
 # Set the seed value!
 torch.manual_seed(config['seed'])
@@ -210,4 +246,3 @@ train_deep_sdf(
     sdf_dataset=sdf_dataset,
     use_wandb=False,
 )
-
