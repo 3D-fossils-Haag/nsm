@@ -199,6 +199,25 @@ def evaluate_category(y_q, y_g, order, eligible=None, k_top5=5):
                "top5_accuracy_reachable": float(t5[el].mean()) if el.any() else float("nan")}
     return summary, report, yt, yp, np.array(top1, dtype=object), np.array(top5)
 
+
+def evaluate_position_mae(q_values, g_values, order):
+    """Continuous normalized-position error from the nearest labelled neighbour."""
+    q = np.asarray(q_values, dtype=float)
+    g = np.asarray(g_values, dtype=float)
+    errors = []
+    for i, neighbours in enumerate(order):
+        if not np.isfinite(q[i]):
+            continue
+        labelled = [j for j in neighbours if np.isfinite(g[j])]
+        if labelled:
+            errors.append(abs(q[i] - g[labelled[0]]))
+    return {
+        "category": "normalized_position",
+        "n_eval": len(errors),
+        "mae": float(np.mean(errors)) if errors else float("nan"),
+        "median_ae": float(np.median(errors)) if errors else float("nan"),
+    }
+
 def plot_confusion(y_true, y_pred, title, out_png, class_order=None, normalize=True):
     present = set(y_true) | set(y_pred)
     classes = [c for c in class_order if c in present] if class_order else sorted(present)
@@ -251,6 +270,10 @@ def main():
     ckpt = args.ckpt
     config = load_config(config_path=f"{run_dir}/model_params_config.json")
     device = config.get("device", "cuda:0")
+    if str(device).startswith("cuda") and not torch.cuda.is_available():
+        print(f"CUDA requested by config ({device}) but unavailable; using CPU.")
+        device = "cpu"
+        config["device"] = device
 
     eval_tag = f'{args.eval_level}_{"base" if not args.encoded_latents else "latent_opt"}'
     suffix   = args.suffix or f"{args.dataset_split}_{eval_tag}"
@@ -331,6 +354,12 @@ def main():
               f"{summ['top1_accuracy']:>8.3f}{summ['top5_accuracy']:>8.3f}"
               f"{summ['macro_f1']:>9.3f}{summ['top1_accuracy_reachable']:>11.3f}"
               f"{summ['n_reachable_classes']:>10}")
+
+    position_summary = evaluate_position_mae(labels_q["norm_pos"], labels_g["norm_pos"], order)
+    summary_rows.append(position_summary)
+    all_json["categories"]["normalized_position"] = {"summary": position_summary}
+    print(f"normalized position MAE: {position_summary['mae']:.4f} "
+          f"(n={position_summary['n_eval']})")
 
     pd.DataFrame(summary_rows).set_index("category").to_csv(os.path.join(out_dir, "metrics_summary.csv"))
     preds.to_csv(os.path.join(out_dir, "predictions.csv"), index=False)
