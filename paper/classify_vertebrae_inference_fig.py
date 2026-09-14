@@ -82,23 +82,23 @@ def plot_predictions(dim_reduced_coords, similar_ids, similar_coords, novel_coor
 
         # Training meshes — bigger, no outline, slightly transparent
         ax.scatter(dim_reduced_coords[:, 0], dim_reduced_coords[:, 1],
-                    color='lightgray', s=200, alpha=0.3,
-                    edgecolors='none', label='Training Meshes', zorder=1)
+                    color='lightgray', s=150, alpha=1,
+                    edgecolors='none', label='TRAIN', zorder=1)
         
         # Top-5 similar (ranks 2–5) in blue
         if len(similar_coords) > 1:
             ax.scatter(similar_coords[1:, 0], similar_coords[1:, 1],
-                        color='steelblue', s=400, alpha=0.4,
-                        edgecolors='none', label='Top 5', zorder=2)
+                        color='steelblue', s=550, alpha=0.8,
+                        edgecolors='none', label='TOP 5', zorder=2)
             
         # Most similar (rank 1) in pink
         ax.scatter(similar_coords[0, 0], similar_coords[0, 1],
-                    color='hotpink', s=400, alpha=0.4,
-                    edgecolors='none', label='Top-1', zorder=3)
+                    color='hotpink', s=550, alpha=0.8,
+                    edgecolors='none', label='TOP 1', zorder=3)
         
         # Novel/query mesh in red, largest
-        ax.scatter(*novel_coord, color='crimson', s=400, alpha=0.4,
-                   edgecolors='none', label='Encoded Mesh', zorder=4)
+        ax.scatter(*novel_coord, color='crimson', s=550, alpha=0.8,
+                   edgecolors='none', label='ENCODED', zorder=4)
 
         # Strip everything: ticks, labels, frame, grid
         ax.set_xticks([])
@@ -109,14 +109,14 @@ def plot_predictions(dim_reduced_coords, similar_ids, similar_coords, novel_coor
         ax.set_facecolor('white')
 
         # Compact legend — no frame, small font
-        leg = ax.legend(fontsize=25, frameon=False,
+        leg = ax.legend(fontsize=37, frameon=False,
                         loc='upper center',
                         bbox_to_anchor=(0.5, -0.04),
                         ncols=2,
                         markerscale=1.1,
                         handletextpad=0.4,
                         columnspacing=1.0)
-        leg.legend_handles[0].set_sizes([500])
+        leg.legend_handles[0].set_sizes([650])
         leg.legend_handles[0].set_alpha(0.5)
 
         plt.tight_layout(pad=0.2)
