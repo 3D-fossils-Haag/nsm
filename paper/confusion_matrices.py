@@ -67,6 +67,17 @@ DEFAULT_CATEGORIES = ["family", "broad_taxon", "region", "position_20",
                       "position_10", "life_history"]
 
 
+# Spelling corrections applied to true and predicted labels before plotting.
+LABEL_FIXES = {
+    "amphisbaenea": "amphisbaenia",
+}
+ 
+ 
+def _fix_labels(arr):
+    """Apply LABEL_FIXES to a label array."""
+    return np.array([LABEL_FIXES.get(v, v) for v in arr], dtype=object)
+
+
 def _cm_figsize(n):
     return max(4.0, 0.45 * n + 2)
 
@@ -196,8 +207,8 @@ def render(path, tag, categories, outdir, normalize=True, no_title=False,
                 print(f"  {tag} {cat}: no scored queries, skipping")
             continue
 
-        yt = sub[tcol].to_numpy(dtype=object)
-        yp = sub[pcol].to_numpy(dtype=object)
+        yt = _fix_labels(sub[tcol].to_numpy(dtype=object))
+        yp = _fix_labels(sub[pcol].to_numpy(dtype=object))
         order = class_order_for(cat, set(yt) | set(yp))
         acc = float((yt == yp).mean())
         title = "" if no_title else f"{cat}  (n={len(yt)}, top1={acc:.2f})"
