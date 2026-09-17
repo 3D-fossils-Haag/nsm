@@ -1,24 +1,31 @@
 # Helpers for plotting PC's
-import matplotlib.pyplot as plt
+import colorsys
+import gc
+import json
+import os
+import re
+import traceback
+from collections import defaultdict
+from itertools import product
+from pathlib import Path
 import numpy as np
 import pandas as pd
-import os
-import gc
-from collections import defaultdict
-from scipy.signal import savgol_filter
 from scipy.interpolate import interp1d
-from matplotlib.colors import is_color_like
+from scipy.signal import savgol_filter
+from scipy.stats import spearmanr
+from sklearn.discriminant_analysis import LinearDiscriminantAnalysis as LDA
+from sklearn.metrics import make_scorer, balanced_accuracy_score
+from sklearn.model_selection import StratifiedKFold, cross_val_score
+from statsmodels.multivariate.manova import MANOVA
+import matplotlib.pyplot as plt
 import matplotlib.patches as mpatches
-import colorsys
+from matplotlib.colors import is_color_like
+import plotly.graph_objects as go
+from plotly.subplots import make_subplots
+import cv2
+import open3d as o3d
 from NSM.helper_funcs import get_region, pv_to_o3d, render_cameras
 from NSM.morphometrics import tps_fit, tps_apply, pc_shape
-import open3d as o3d
-from pathlib import Path
-import cv2
-import json
-from scipy.stats import spearmanr
-from itertools import product
-import re
 
 # Dictionary for species mapping to family, family-specific attributes, and colors
 family_info = {
@@ -777,3 +784,128 @@ def spearman_tables(lbl_a, lbl_b, R, P, out_dir=None, alpha=0.05):
         df_r.to_csv(Path(out_dir) / f"spearman_r_{slug}.csv")
         df_p.to_csv(Path(out_dir) / f"spearman_p_{slug}.csv")
     return df_r, df_p
+
+# LDA plotting funcs
+
+def n_pcs_for_variance(cum, threshold):
+    """Number of PCs needed to reach `threshold` cumulative variance."""
+    if threshold >= 1.0:
+        return len(cum)
+    return int(np.searchsorted(cum, threshold) + 1)
+ 
+def fmt_p(val, significant=False):
+    """Format a p-value in compact scientific notation, starred if significant."""
+    if pd.isna(val):
+        return "NaN"
+    if val == 0:
+        s = "< 1e-300"
+    else:
+        exp = int(np.floor(np.log10(abs(val))))
+        s = f"{val / 10**exp:.2f}e{exp:+03d}"
+    return s + ("*" if significant else "")
+ 
+def manova_stats(X_lda, ys):
+    """Overall MANOVA on the LD scores. Returns Wilks' lambda, F, p, and partial eta-squared."""
+    df = pd.DataFrame(X_lda, columns=[f"LD{i+1}" for i in range(X_lda.shape[1])])
+    df["group"] = ys
+    formula = " + ".join(c for c in df.columns if c != "group")
+    stat = MANOVA.from_formula(f"{formula} ~ group", data=df).mv_test().results["group"]["stat"]
+    wilks = stat.loc["Wilks' lambda"]
+    lam = float(wilks["Value"])
+    return {"wilks_lambda": lam,
+            "manova_F": float(wilks["F Value"]),
+            "manova_num_df": float(wilks["Num DF"]),
+            "manova_den_df": float(wilks["Den DF"]),
+            "manova_p": float(wilks["Pr > F"]),
+            "partial_eta_sq": 1 - lam ** (1 / min(X_lda.shape[1], len(set(ys)) - 1))}
+ 
+def lda_threshold_grid(reps_by_threshold, labels, group_colors, thresholds, col_order, col_titles,
+                       row_labels=None, min_n=10, use_shrinkage=True, show_accuracy=False,
+                       width=2100, height=2100, font_size=45, marker_size=12,
+                       legend_marker_size=60, outstem=None, out_dir=None, show=True):
+    """LDA scatter grid: rows = variance thresholds, cols = representations.
+ 
+    out_dir : directory for the .html/.png written when `outstem` is given. Required
+              with `outstem` (the notebook used to supply this via a global OUT_DIR).
+    show    : call fig.show() before returning.
+    """
+    if outstem and out_dir is None:
+        raise ValueError("out_dir is required when outstem is given")
+ 
+    labels = pd.Series(labels).reset_index(drop=True)
+    fig = make_subplots(rows=len(thresholds), cols=len(col_order),
+                        horizontal_spacing=0.055, vertical_spacing=0.11)
+ 
+    # Row selection depends only on `labels`, so it is identical for every panel:
+    # drop NaNs, then drop classes with fewer than min_n specimens.
+    rows = labels.notna().values.copy()
+    kept = labels[rows].reset_index(drop=True)
+    rows[rows] = ~kept.isin(kept.value_counts()[lambda v: v < min_n].index)
+    ys = labels[rows].values
+    levels = sorted(set(ys))
+ 
+    clf = LDA(solver="eigen", shrinkage="auto") if use_shrinkage else LDA(solver="svd")
+    if show_accuracy:
+        cv = StratifiedKFold(n_splits=min(5, pd.Series(ys).value_counts().min()),
+                             shuffle=True, random_state=42)
+ 
+    subtitles = {}
+    for r, thr in enumerate(thresholds, start=1):
+        for c, rep in enumerate(col_order, start=1):
+            Xs = np.asarray(reps_by_threshold[(thr, rep)])[rows]
+            X_lda = clf.fit_transform(Xs, ys)
+ 
+            subtitles[(r, c)] = f"{Xs.shape[1]} PCs"
+            if show_accuracy:
+                acc = cross_val_score(clf, Xs, ys, cv=cv,
+                                      scoring=make_scorer(balanced_accuracy_score)).mean()
+                subtitles[(r, c)] += f"<br>ACC = {acc:.3f}"
+ 
+            for lev in levels:
+                idx = ys == lev
+                fig.add_trace(go.Scatter(
+                    x=X_lda[idx, 0], y=X_lda[idx, 1], mode="markers",
+                    name=str(lev).upper(), legendgroup=str(lev), showlegend=False,
+                    marker=dict(color=plotly_color(group_colors.get(lev, (.5, .5, .5))),
+                                size=marker_size, symbol="circle"),
+                    hovertemplate=f"{lev}<extra></extra>"), row=r, col=c)
+ 
+    fig.update_layout(width=width, height=height, plot_bgcolor="white",
+                      font=dict(size=font_size),
+                      legend=dict(orientation="h", x=0.5, xanchor="center", y=-0.05,
+                                  yanchor="top", font=dict(size=font_size)),
+                      margin=dict(t=170, b=200, l=170, r=60))
+    axis_style = dict(showline=True, linewidth=2, linecolor="black", mirror=True,
+                      ticks="outside", showticklabels=False, showgrid=False)
+    fig.update_xaxes(title_text="LD1", **axis_style)
+    fig.update_yaxes(title_text="LD2", **axis_style)
+ 
+    def ann(x, y, text, **kw):
+        return dict(x=x, y=y, text=text, xref="paper", yref="paper", showarrow=False, **kw)
+ 
+    anns = [ann(sum(fig.get_subplot(1, c).xaxis.domain) / 2, 1.1, ct,
+                xanchor="center", font=dict(size=font_size * 1.15))
+            for c, ct in enumerate(col_titles, start=1)]
+    anns += [ann(-0.075, sum(fig.get_subplot(r, 1).yaxis.domain) / 2, rl,
+                 textangle=-90, yanchor="middle", font=dict(size=font_size * 1.15))
+             for r, rl in enumerate(row_labels or [f"{100*t:.0f}% VAR" for t in thresholds],
+                                    start=1)]
+    anns += [ann(sum(fig.get_subplot(r, c).xaxis.domain) / 2,
+                 fig.get_subplot(r, c).yaxis.domain[1] + 0.004, st,
+                 xanchor="center", yanchor="bottom", font=dict(size=font_size * 0.9))
+             for (r, c), st in subtitles.items()]
+    fig.update_layout(annotations=anns)
+ 
+    for lev in levels:
+        fig.add_trace(go.Scatter(x=[None], y=[None], mode="markers",
+                                 name=str(lev).upper(), legendgroup=str(lev), showlegend=True,
+                                 marker=dict(color=plotly_color(group_colors.get(lev, (.5, .5, .5))),
+                                             size=legend_marker_size, symbol="circle")))
+    if outstem:
+        out_dir = Path(out_dir)
+        out_dir.mkdir(parents=True, exist_ok=True)
+        fig.write_html(str(out_dir / f"{outstem}.html"), include_plotlyjs="cdn")
+        fig.write_image(str(out_dir / f"{outstem}.png"))
+    if show:
+        fig.show()
+    return fig
