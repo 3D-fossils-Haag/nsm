@@ -636,3 +636,21 @@ def procD_pgls(Y, terms, C, iter=999, seed=42, verbose=True):
     """geomorph::procD.pgls -- Procrustes ANOVA with a Brownian error structure."""
     return procD_lm_general(Y, terms, iter=iter, seed=seed,
                             transform=_gls_whitener(C), verbose=verbose)
+
+def lm_diff(coords, a_idx, b_idx):
+    """Per-coordinate difference between two landmarks across all specimens.
+    """
+    return coords[:, a_idx, :] - coords[:, b_idx, :]
+ 
+def check_axis_labels(check, axis, values, how, detail=""):
+    """Print a per-coordinate statistic and return the coordinate index it selects.
+    """
+    idx = int(np.argmin(values) if how == "min" else np.argmax(values))
+    extreme = "lowest" if how == "min" else "highest"
+    print(f"\n{check} - Find which idx is the {axis.upper()}-axis")
+    if detail:
+        print(detail)
+    print(f"idx with the {extreme} value should be {axis.upper()} axis: {axis.upper()} idx = ", idx)
+    for i, v in enumerate(values):
+        print(f"{i}:", v)
+    return idx

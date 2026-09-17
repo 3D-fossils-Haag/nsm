@@ -19,6 +19,7 @@ from sklearn.model_selection import StratifiedKFold, cross_val_score
 from statsmodels.multivariate.manova import MANOVA
 import matplotlib.pyplot as plt
 import matplotlib.patches as mpatches
+from matplotlib.lines import Line2D
 from matplotlib.colors import is_color_like
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
@@ -909,3 +910,84 @@ def lda_threshold_grid(reps_by_threshold, labels, group_colors, thresholds, col_
     if show:
         fig.show()
     return fig
+
+# For mophol_disparity_lms_latents.ipynb
+def dumbbell_plot(df, out_path, ref_col, cmp_col, colors, segments=None, bands=None,
+                  band_colors=None, min_shift=None, grey=(0.62, 0.62, 0.62),
+                  figsize=(9, 11), right_pad=1.0,
+                  xlabel="DISPARITY RANK (1 = MOST DISPARATE)",
+                  ref_label="SPARSE LANDMARKS", cmp_label="NSM LATENTS"):    
+    if isinstance(df, (str, Path)):
+        df = pd.read_csv(df, index_col=0)
+    segments    = segments or {}
+    band_colors = band_colors or {}
+
+    fig, ax = plt.subplots(figsize=figsize)
+    y_pos = np.arange(len(df))[::-1]       
+
+    for y, (name, row) in zip(y_pos, df.iterrows()):
+        r_ref = float(row[ref_col])
+        r_cmp = float(row[cmp_col])
+        shift = r_ref - r_cmp
+
+        muted = (min_shift is not None) and (abs(shift) < min_shift)
+        color = grey if muted else colors.get(name, grey)
+        alpha = 0.3  if muted else 1.0
+        lw    = 1.2  if muted else 2.4
+
+        if muted:
+            ax.plot([r_ref, r_cmp], [y, y], color=grey, lw=lw, alpha=alpha,
+                    zorder=1, solid_capstyle="round")
+        else:
+            span, x0 = r_cmp - r_ref, r_ref
+            for frac, seg_col in segments.get(name, [(1.0, color)]):
+                x1 = x0 + span * frac
+                ax.plot([x0, x1], [y, y], color=seg_col, lw=lw, alpha=alpha,
+                        zorder=1, solid_capstyle="butt")
+                x0 = x1
+
+        ax.scatter(r_ref, y, s=46, facecolor="white", edgecolor=color,
+                   linewidth=1.8, zorder=3, alpha=alpha)
+        ax.scatter(r_cmp, y, s=46, color=color, zorder=3, alpha=alpha)
+
+        # Bold where cmp ranks the group more disparate than ref does
+        ax.text(-0.6, y, str(name).upper(), ha="right", va="center", fontsize=12,
+                color="0.55" if muted else "0.15",
+                fontweight="semibold" if shift > 0 else "normal")
+
+    ax.set_yticks([])
+    ax.set_xlabel(xlabel, fontsize=12)
+    x_max = max(df[ref_col].max(), df[cmp_col].max())
+    ax.set_xlim(-0.5, x_max + right_pad)
+    ax.set_ylim(-1, len(df))
+
+    # Band separators + right-margin band labels
+    if bands is not None:
+        bands = list(bands)
+        start = 0
+        for i in range(1, len(bands) + 1):
+            if i == len(bands) or bands[i] != bands[start]:
+                t = bands[start]
+                y_hi, y_lo = y_pos[start], y_pos[i - 1]
+                if i < len(bands):                           # divider below block
+                    ax.axhline(y_lo - 0.5, color="0.88", lw=0.8, zorder=0)
+                ax.text(len(df) + 3.2, (y_hi + y_lo) / 2,
+                        (t or "—").upper(), rotation=-90,
+                        ha="center", va="center", fontsize=12,
+                        color=band_colors.get(t, grey), fontweight="bold")
+                start = i
+
+    ax.spines[["left", "right", "top"]].set_visible(False)
+    ax.grid(axis="x", color="0.9", lw=0.6, zorder=0)
+    ax.set_axisbelow(True)
+
+    handles = [Line2D([], [], marker="o", ls="none", color="0.35", markersize=8, label=cmp_label),
+                Line2D([], [], marker="o", ls="none", markerfacecolor="white", markeredgecolor="0.35", markeredgewidth=1.6, markersize=8, label=ref_label)]
+    ax.legend(handles=handles, fontsize=12, ncol=2,
+              loc="lower right", bbox_to_anchor=(1.0, 1.01),
+              frameon=False, borderpad=0.8)
+
+    plt.tight_layout()
+    plt.savefig(out_path, dpi=300, bbox_inches="tight")
+    plt.show()
+    print(f"Saved → {out_path}")
