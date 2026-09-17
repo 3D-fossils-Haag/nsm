@@ -1,27 +1,43 @@
-# Save 10 evenly spaced snapshots along PC1 (forward direction only)
-import os, json, torch, numpy as np, cv2, open3d as o3d, pyvista as pv, gc
+# Save evenly spaced snapshots along one PC (forward direction only)
+import os, json, torch, numpy as np, cv2, open3d as o3d, pyvista as pv, gc, argparse
 from NSM.mesh import create_mesh
 from NSM.helper_funcs import NumpyTransform, pv_to_o3d, load_config, load_model_and_latents, render_cameras, generate_and_render_mesh
 from NSM.traverse_latents import generate_latent_path_plot
 from pathlib import Path
+import sys
 
-# ── config (same as your video script) ──────────────────────────────────────
-cwd = Path.cwd()
-base_wd = cwd.parent 
-TRAIN_DIR = base_wd / "run_v72" # TO DO: Choose training directory containing model ckpt and latent codes
+# ── args ────────────────────────────────────────────────────────────────────
+ap = argparse.ArgumentParser()
+ap.add_argument("--pc", type=int, required=True, help="PC to traverse, 1-based")
+ap.add_argument("--train-dir", default=str(Path.cwd().parent / "run_v72"), help="dir with model ckpt and latent codes")
+ap.add_argument("--ckpt", default="2500")
+ap.add_argument("--n-snapshots", type=int, default=4)
+ap.add_argument("--amplify", type=float, default=1.5)
+ap.add_argument("--view", type=str, default="side", choices=["front", "side"])
+ap.add_argument("--out-dir", default="pc_snapshots/NSM/{view}/pc{N}")
+args = ap.parse_args()
+
+# ── config ──────────────────────────────────────
+TRAIN_DIR = Path(args.train_dir)
 os.chdir(TRAIN_DIR)
-PC_idx      = 3
-CKPT        = '2500'
+PC_idx      = args.pc - 1
+CKPT        = args.ckpt
 LC_PATH     = f'latent_codes/{CKPT}.pth'
 MODEL_PATH  = f'model/{CKPT}.pth'
-N_SNAPSHOTS = 10
-amplify     = 1.5
+N_SNAPSHOTS = args.n_snapshots
+amplify     = args.amplify
 width, height = 640, 480
-# Set background color
-BASE_BG_COL     = np.array([0.38, 1, 0.98])    # aquamarine
-MAX_TINT_BG_COL = np.array([0.03, 0.11, 0.1])  # dark teal
-# 5 evenly spaced colors between base and max tint
-bg_cols = np.linspace(BASE_BG_COL, MAX_TINT_BG_COL, 5)  # shape (5, 3)
+
+# z-rotation applied before the render, one angle per view
+VIEW_ROT_DEG = {"side": 13.0, "front": 90.0 + 13.0}
+ROT_DEG      = VIEW_ROT_DEG[args.view]
+
+# Set background colors to interpolate between
+BASE_BG_COL     = np.array([0.839, 1, 0.996])    # aquamarine
+MAX_TINT_BG_COL = np.array([0, 0.58, 0.522])  # dark teal
+
+# Evenly spaced colors between base and max tint
+bg_cols = np.linspace(BASE_BG_COL, MAX_TINT_BG_COL, N_SNAPSHOTS)
 bg_col  = bg_cols[PC_idx]                                 # row for this PC
 
 config  = load_config(config_path='model_params_config.json')
@@ -55,20 +71,9 @@ min_proj = projections.min()
 high_delta = max_proj - center_proj
 low_delta  = min_proj - center_proj
 
-# ── build the FORWARD alpha sweep only ──────────────────────────────────────
-# Your video goes: low→0, 0→high, high→0, 0→low  (4 segments).
-# The first direction is just low→high (first TWO segments concatenated).
-n_seg        = 15                     # same as video (without n_rotations)
-alpha_forward = np.concatenate([
-    np.linspace(low_delta,  0,          n_seg),
-    np.linspace(0,          high_delta, n_seg),
-])
-total_forward = len(alpha_forward)    # 30 frames in the forward pass
+alphas = np.linspace(high_delta, low_delta, N_SNAPSHOTS)
 
-# Pick 10 evenly spaced indices from that forward sweep
-snapshot_indices = np.linspace(0, total_forward - 1, N_SNAPSHOTS, dtype=int)
-
-# ── renderer (same material as video) ───────────────────────────────────────
+# ── renderer ───────────────────────────────────────
 renderers = [o3d.visualization.rendering.OffscreenRenderer(width, height)
              for _ in range(4)]
 for r in renderers:
@@ -79,57 +84,46 @@ material.shader       = "defaultLit"
 material.base_color   = [1.0, 1.0, 1.0, 1.0]
 
 # ── output folder ────────────────────────────────────────────────────────────
-out_dir = f"pc{PC_idx+1}_snapshots"
+out_dir = args.out_dir.format(view=args.view, N=PC_idx+1)
 os.makedirs(out_dir, exist_ok=True)
 
 # ── render & save ────────────────────────────────────────────────────────────
-for snap_num, frame_idx in enumerate(snapshot_indices):
-    alpha = alpha_forward[frame_idx]
+for snap_num, alpha in enumerate(alphas):
     try:
+        print(f"NSM traversal for {snap_num} of PC {PC_idx+1}")
         new_latent_np = center_sample + amplify * alpha * pc1
         proj_val      = np.dot(new_latent_np - latent_mean, pc1)
 
-        # Generate mesh (reuse your helper; total_frames / frame idx are only
-        # used for progress printing inside the helper)
-        mesh_o3d = generate_and_render_mesh(
-            new_latent_np, total_forward, frame_idx, device, model,
-            n_pts_per_axis, voxel_origin, voxel_size,
-            offset, scale, icp_transform, objects,
-            generated_mesh_count=snap_num
-        )
+        mesh_o3d = generate_and_render_mesh(new_latent_np, N_SNAPSHOTS, snap_num, device, model,
+                                            n_pts_per_axis, voxel_origin, voxel_size,
+                                            offset, scale, icp_transform, objects,
+                                            generated_mesh_count=snap_num)
 
-        # After generating mesh_o3d, rotate 90° around the vertical (z) axis
-        R = o3d.geometry.get_rotation_matrix_from_axis_angle([0, 0, (np.deg2rad(13))])
+        # After generating mesh_o3d, rotate around the vertical (z) axis
+        R = o3d.geometry.get_rotation_matrix_from_axis_angle([0, 0, np.deg2rad(ROT_DEG)])
         mesh_o3d.rotate(R, center=mesh_o3d.get_center())
 
-        # 4‑way render (same as video)
+        # 4‑way render from video script - hacky but doesnt cost much compute-wise
         # Get full 4-way render then crop to top-right panel only
-        combined = render_cameras(
-            renderers, mesh_o3d, frame_idx, material,
-            total_forward, n_rotations=1
-        )
-
-        # Top-right panel: first row, second column
+        combined = render_cameras(renderers, mesh_o3d, snap_num, material, N_SNAPSHOTS, n_rotations=1)
         top_right = combined[:height, width:]
 
         # Save as PNG
-        out_file = os.path.join(
-            out_dir,
-            f"pc{PC_idx+1}_snapshot_{snap_num+1:02d}_of_{N_SNAPSHOTS}"
-            f"_alpha{alpha:.3f}.png"
-        )
+        out_file = os.path.join(out_dir, f"step{snap_num+1:02d}_of_{N_SNAPSHOTS}.png")
         cv2.imwrite(out_file, top_right)
-        print(f"Saved snapshot {snap_num+1}/{N_SNAPSHOTS} → {out_file}")
+        print(f"NSM  PC{PC_idx+1}  {snap_num+1}/{N_SNAPSHOTS}  "
+              f"score={proj_val:.3f}  ✓", flush=True)
 
     except Exception as e:
-        print(f"Error at snapshot {snap_num+1} (frame {frame_idx}): {e}")
+        print(f"Error at snapshot {snap_num+1} (frame {snap_num}): {e}")
         import traceback; traceback.print_exc()
     finally:
-        for var in ['mesh_o3d', 'new_latent_np', 'combined', 'latent_path_img']:
-            if var in locals():
-                del locals()[var]
+        mesh_o3d = combined = top_right = new_latent_np = None
         gc.collect()
         if device.startswith("cuda"):
             torch.cuda.empty_cache()
 
-print(f"\nDone – {N_SNAPSHOTS} snapshots saved to '{out_dir}/'")
+print(f"Done – {N_SNAPSHOTS} snapshots saved to '{out_dir}/'")
+sys.stdout.flush()
+sys.stderr.flush()
+os._exit(0)
