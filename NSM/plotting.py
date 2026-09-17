@@ -3,14 +3,22 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 import os
+import gc
 from collections import defaultdict
 from scipy.signal import savgol_filter
 from scipy.interpolate import interp1d
 from matplotlib.colors import is_color_like
 import matplotlib.patches as mpatches
 import colorsys
-from NSM.helper_funcs import get_region
+from NSM.helper_funcs import get_region, pv_to_o3d, render_cameras
+from NSM.morphometrics import tps_fit, tps_apply, pc_shape
+import open3d as o3d
+from pathlib import Path
+import cv2
 import json
+from scipy.stats import spearmanr
+from itertools import product
+import re
 
 # Dictionary for species mapping to family, family-specific attributes, and colors
 family_info = {
@@ -587,3 +595,185 @@ def load_mrk_json(path):
         labels.append(cp.get("label"))
     points = np.asarray(points, dtype=np.float32)
     return points, labels
+ 
+ 
+def bg_colors(n_pcs, base_col, max_tint_col):
+    """One background colour per PC row, base → max tint."""
+    return np.linspace(base_col, max_tint_col, n_pcs)
+
+def view_rotation(rot_deg):
+    """z-rotation matrix, degrees about the vertical axis."""
+    return o3d.geometry.get_rotation_matrix_from_axis_angle([0, 0, np.deg2rad(rot_deg)])
+
+def make_renderers(width, height, n=4):
+    return [o3d.visualization.rendering.OffscreenRenderer(width, height) for _ in range(n)]
+
+def make_material():
+    mat = o3d.visualization.rendering.MaterialRecord()
+    mat.shader     = "defaultLit"
+    mat.base_color = [1.0, 1.0, 1.0, 1.0]
+    return mat
+
+def warp_mesh(mesh, ref_lms, target_lms, mag=1.0):
+    """geomorph::warpRefMesh -- deform a surface with the TPS fitted to the landmarks."""
+    tgt = ref_lms + mag * (np.asarray(target_lms) - ref_lms)
+    tps = tps_fit(ref_lms, tgt)
+    warped = mesh.copy()
+    warped.points = tps_apply(tps, np.asarray(mesh.points))
+    return warped, tps
+ 
+def crop_top_right(combined, width, height):
+    return combined[:height, width:]
+ 
+def build_warp_grid(pca, mean_lms, atlas_mesh, out_dir, label, renderers, rot_matrix,
+                    width, height, n_pcs=4, n_steps=4, bg_cols=None):
+    """Render each cell and save as individual PNG — no in-memory assembly."""
+    os.makedirs(out_dir, exist_ok=True)
+    mat = make_material()
+    if bg_cols is None:
+        bg_cols = bg_colors(n_pcs)
+ 
+    for pc_idx in range(n_pcs):
+        pc_dir   = os.path.join(out_dir, f"pc{pc_idx + 1}")
+        os.makedirs(pc_dir, exist_ok=True)
+ 
+        observed = pca["x"][:, pc_idx]
+        scores   = np.linspace(observed.max(), observed.min(), n_steps)
+        bg_color = bg_cols[pc_idx]
+ 
+        for r in renderers:
+            r.scene.set_background(list(bg_color) + [1.0])
+ 
+        for step_idx, score in enumerate(scores):
+            img     = np.full((height, width, 3),
+                              (bg_color * 255).astype(np.uint8), dtype=np.uint8)
+            tps_obj = None
+            try:
+                target             = pc_shape(pca, pc_idx, score=score)
+                warped_pv, tps_obj = warp_mesh(atlas_mesh, mean_lms, target)
+                del target, tps_obj;  tps_obj = None
+ 
+                pv_clean = warped_pv.extract_surface(algorithm='dataset_surface').triangulate()
+                del warped_pv
+                pv_clean = pv_clean.compute_normals(cell_normals=False, point_normals=True,
+                                                    inplace=False, auto_orient_normals=True)
+                o3d_mesh = pv_to_o3d(pv_clean)
+                del pv_clean
+                o3d_mesh.compute_vertex_normals()
+                o3d_mesh.rotate(rot_matrix, center=o3d_mesh.get_center())
+ 
+                combined = render_cameras(renderers, o3d_mesh, step_idx,
+                                          mat, n_steps, n_rotations=1)
+                del o3d_mesh
+                img = crop_top_right(combined, width, height)
+                del combined
+ 
+            except Exception as e:
+                print(f"  Error {label} PC{pc_idx+1} step {step_idx+1}: {e}")
+                import traceback; traceback.print_exc()
+            finally:
+                if tps_obj is not None:
+                    del tps_obj
+                gc.collect()
+ 
+            fname = os.path.join(pc_dir, f"step{step_idx+1:02d}_of_{n_steps}.png")
+            cv2.imwrite(fname, img)
+            del img
+            print(f"  {label}  PC{pc_idx+1}  {step_idx+1}/{n_steps}  score={score:.3f}  ✓",
+                  flush=True)
+            gc.collect()
+ 
+    print(f"Done — PNGs saved to {out_dir}")
+
+def stitch_grid(out_dir, label, grid_path=None, flip_pcs=(), n_pcs=4, n_steps=4):
+    out_dir  = Path(out_dir)
+    flip_pcs = set(flip_pcs)
+    rows = []
+    for pc_idx in range(n_pcs):
+        pc_dir = out_dir / f"pc{pc_idx + 1}"
+        files  = sorted(pc_dir.glob("step*.png"))
+        if len(files) != n_steps:
+            print(f"  Warning: PC{pc_idx+1} has {len(files)} files, expected {n_steps}")
+        if pc_idx + 1 in flip_pcs:
+            imgs = [cv2.imread(str(f)) for f in reversed(files)]
+        else:
+            imgs = [cv2.imread(str(f)) for f in files]
+        rows.append(np.hstack(imgs))
+ 
+    grid      = np.vstack(rows)
+    grid_path = Path(grid_path) if grid_path else out_dir.parent / f"pc_grid_{label}.png"
+    ok = cv2.imwrite(str(grid_path), grid)
+    if not ok:
+        raise OSError(f"cv2.imwrite failed for {grid_path.resolve()}")
+    print(f"Grid saved → {grid_path.resolve()}  ({grid.shape[1]}×{grid.shape[0]} px)")
+    return grid_path
+ 
+def load_rgb(path):
+    img = cv2.imread(str(path))
+    if img is None:
+        raise FileNotFoundError(f"Could not load: {path}")
+    return cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+
+# ── Spearman correlations between PC blocks ──────────────────────────────────
+_pc_num = lambda c: int(re.search(r"\d+$", c).group())
+
+def load_pc_block(csv_path, prefix, id_cols):
+    df = pd.read_csv(csv_path)
+    return df[list(id_cols) + sorted([c for c in df.columns if c.startswith(prefix)], key=_pc_num)]
+
+def pc_block(df, prefix):
+    cols = sorted([c for c in df.columns if c.startswith(prefix)], key=_pc_num)
+    return cols, df[cols].to_numpy()
+
+def spearman_matrix(A, B):
+    """r and Bonferroni-corrected p for every column pair."""
+    R = np.empty((A.shape[1], B.shape[1]))
+    P = np.empty_like(R)
+    for i, j in product(range(A.shape[1]), range(B.shape[1])):
+        R[i, j], P[i, j] = spearmanr(A[:, i], B[:, j])
+    return R, np.clip(P * R.size, 0, 1)
+
+def plot_spearman_heatmaps(results, out_path=None, alpha=0.05,
+                           label_size=35, tick_size=30, cell_size=30, cb_size=30,
+                           figsize=(28, 8), dpi=300, cmap_name="PuBuGn",
+                           cell_fmt="{:+.2f}", tick_rotation=45):
+    """results: list of (label_a, label_b, R, P). Colour encodes |r|."""
+    plt.rcParams.update({"font.weight": "normal", "axes.labelweight": "normal",
+                         "font.size": label_size})
+    fig, axes = plt.subplots(1, len(results), figsize=figsize)
+    fig.subplots_adjust(left=0.06, right=0.88, top=0.92, bottom=0.15, wspace=0.4)
+    cax = fig.add_axes([0.905, 0.15, 0.018, 0.77])
+
+    for ax, (lbl_a, lbl_b, R, P) in zip(axes, results):
+        n_a, n_b = R.shape
+        im = ax.imshow(abs(R), vmin=0, vmax=1, cmap=plt.get_cmap(cmap_name).reversed(), aspect="auto")
+        ax.set_yticks(range(n_a), [f"PC{i+1}" for i in range(n_a)], fontsize=tick_size)
+        ax.set_xticks(range(n_b), [f"PC{j+1}" for j in range(n_b)],
+                      rotation=tick_rotation, ha="right", fontsize=tick_size)
+        ax.set_ylabel(lbl_a, fontsize=label_size, labelpad=10)
+        ax.set_xlabel(lbl_b, fontsize=label_size, labelpad=10)
+        for i, j in product(range(n_a), range(n_b)):
+            ax.text(j, i, cell_fmt.format(R[i, j]), ha="center", va="center", fontsize=cell_size,
+                    color="black", fontweight="bold" if P[i, j] < alpha else "normal")
+
+    cb = fig.colorbar(im, cax=cax)
+    cb.set_label("|SPEARMAN'S R|", fontsize=cb_size, labelpad=12)
+    cb.ax.tick_params(labelsize=cb_size)
+    if out_path:
+        plt.savefig(out_path, dpi=dpi, bbox_inches="tight")
+    return fig
+
+def spearman_tables(lbl_a, lbl_b, R, P, out_dir=None, alpha=0.05):
+    rows = [f"{lbl_a} PC{i+1}" for i in range(R.shape[0])]
+    cols = [f"{lbl_b} PC{j+1}" for j in range(R.shape[1])]
+    df_r = pd.DataFrame(R.round(3), index=rows, columns=cols)
+    df_p = pd.DataFrame(P.round(4), index=rows, columns=cols)
+    for row in rows:
+        best = df_r.loc[row].abs().idxmax()
+        flag = "  *" if df_p.loc[row, best] < alpha else ""
+        print(f"    {row:24s}  →  {best:26s}  r = {df_r.loc[row, best]:+.3f}{flag}")
+    if out_dir:
+        slug = f"{lbl_a}_vs_{lbl_b}".replace(" ", "_")
+        df_r.to_csv(Path(out_dir) / f"spearman_r_{slug}.csv")
+        df_p.to_csv(Path(out_dir) / f"spearman_p_{slug}.csv")
+    return df_r, df_p
