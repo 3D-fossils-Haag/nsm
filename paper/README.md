@@ -257,6 +257,8 @@ Creates a synthetic five-class, row-normalized confusion-matrix schematic for us
 
 **Output:** `conf_matrix_schematic.png`
 
+---
+
 ### `classify_vertebrae_inference_fig.py`
 
 **Produces:** Figure N inference panel(s)
