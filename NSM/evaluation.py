@@ -10,6 +10,11 @@ import time
 import pyvista as pv
 from NSM.optimization import normalize_mesh, get_norm_params, get_top_k_pcs, build_sdf_dataset, encode_latent, encode_latent_pointnet, reconstruct_mesh_from_latent, optimize_latent_partial
 from NSM.helper_funcs import convert_ply_to_vtk
+import glob
+import sys
+from collections import namedtuple
+import math
+from scipy.stats import spearmanr, t as t_dist
 
 # Strip _partial to match partial_mesh_path and ground_truth_path pairs
 def strip_partial_mesh_name(path):
@@ -291,3 +296,170 @@ def grid_search_pointnet(pairs, model, config, mean_latent, latent_codes, device
     if log_path_csv:
         print(f"Finished. Final trial log with all trials saved to {log_path_csv}")
     return best['cfg'], rows
+
+# Helpers for classif_tables.py and classif_figures.py
+Result = namedtuple("Result", "run split eval_level latents path")
+
+SPLIT_ORDER = {"train": 0, "val": 1, "test": 2}
+RUN_LABELS = {"run_v72": "Base", "run_v73h": "Hierarchy", "run_v73c": "Contrastive"}
+EVAL_LABELS = {"loo": "LOO", "specimen": "LOSO"}
+SUFFIX_RE = re.compile(r"^(loo|specimen|species|genus)(?:_(base|latent_opt))?$")
+LABEL_FIXES = {"amphisbaenea": "amphisbaenia"}
+
+def find_results(roots, filename, split=None, eval_level=None, latents=None,
+                 run=None):
+    """Yield a Result for every <filename> found under the given runs.
+
+    Any of split/eval_level/latents/run narrows the crawl; left as None they
+    match everything. Filtering here rather than after the fact is what keeps
+    the scripts from writing one file per combination.
+    """
+    want = {"split": split, "eval_level": eval_level, "latents": latents,
+            "run": run}
+    for root in roots:
+        base = os.path.join(root, "classification", "evaluation")
+        if not os.path.isdir(base):
+            print(f"  no evaluation directory under {root}", file=sys.stderr)
+            continue
+        run_name = os.path.basename(root.rstrip("/"))
+        for path in sorted(glob.glob(os.path.join(base, "*", "*", filename))):
+            d = os.path.dirname(path)
+            sp = os.path.basename(os.path.dirname(d))
+            tail = re.sub(rf"^{re.escape(sp)}_", "", os.path.basename(d))
+            m = SUFFIX_RE.match(tail)
+            ev, lat = (m.group(1), m.group(2) or "?") if m else (tail, "?")
+            res = Result(run_name, sp, ev, lat, path)
+            if all(v is None or getattr(res, k) == v for k, v in want.items()):
+                yield res
+
+def normalize_labels(df, quiet=False):
+    """Rewrite known spelling variants in every <cat>_true/<cat>_pred column."""
+    lut = {k.lower(): v for k, v in LABEL_FIXES.items()}
+    seen = set()
+    for c in [c for c in df.columns if c.endswith(("_true", "_pred"))]:
+        s = df[c].astype("string")
+        hit = s.str.lower().isin(lut)
+        if hit.any():
+            seen.update(s[hit].unique().tolist())
+            df[c] = s.where(~hit, s.str.lower().map(lut))
+    if seen and not quiet:
+        print(f"  normalised label spelling: {', '.join(sorted(seen))}")
+    return df
+
+MIN_CLASSES_FOR_RHO = 4          # below this a rho is not worth reporting
+S4_NAME = "Table_S4_classif_by_spec_num.csv"
+S5_NAME = "Table_S5_classif_by_spec_spearmans.csv"
+ 
+def class_support(df, cat):
+    """Per-class recall and the amount of data behind each class (Table S4).
+    Both counts come from predictions.csv.
+    Under specimen masking the specimen count is the one that can plausibly
+    drive recall, since all vertebrae of the held-out individual leave the
+    gallery together.
+    """
+    tcol, pcol, hcol = f"{cat}_true", f"{cat}_pred", f"{cat}_top5_hit"
+    if tcol not in df.columns or pcol not in df.columns:
+        return None
+    sub = df[df[tcol].notna() & df[pcol].notna()].copy()
+    if sub.empty:
+        return None
+ 
+    sub["_hit1"] = (sub[tcol].astype(str) == sub[pcol].astype(str)).astype(float)
+    g = sub.groupby(sub[tcol].astype(str))
+    out = pd.DataFrame({"n_vertebrae": g.size(), "top1_recall": g["_hit1"].mean()})
+    out["top5_recall"] = (g[hcol].apply(lambda s: s.astype(bool).mean())
+                          if hcol in sub.columns else np.nan)
+    out["n_specimens"] = g["specimen"].nunique() if "specimen" in sub.columns else np.nan
+    out.index.name = "class"
+    return out.reset_index()[["class", "n_specimens", "n_vertebrae",
+                              "top1_recall", "top5_recall"]]
+ 
+def _clean(*arrays):
+    arrays = [np.asarray(a, dtype=float) for a in arrays]
+    ok = np.all([np.isfinite(a) for a in arrays], axis=0)
+    return [a[ok] for a in arrays], int(ok.sum())
+ 
+def spearman(x, y):
+    """Spearman rho, two-sided p, and the n actually used.
+    """
+    (x, y), n = _clean(x, y)
+    if n < 3 or np.ptp(x) == 0 or np.ptp(y) == 0:
+        return np.nan, np.nan, n
+    rho, p = spearmanr(x, y)
+    return float(rho), float(p), n
+ 
+def partial_spearman(x, y, z):
+    """Spearman correlation of x and y with z partialled out.
+    Specimen count and vertebra count are themselves strongly correlated across
+    classes, so their separate rhos are not independent evidence. This asks
+    whether x still tracks y once the shared variation with z is removed:
+    a Pearson partial on ranks, with df = n - 3.
+    """
+    (x, y, z), n = _clean(x, y, z)
+    if n < 5 or min(np.ptp(x), np.ptp(y), np.ptp(z)) == 0:
+        return np.nan, np.nan, n
+ 
+    rx, ry, rz = (pd.Series(v).rank().to_numpy() for v in (x, y, z))
+    rxy, rxz, ryz = (np.corrcoef(a, b)[0, 1] for a, b in
+                     ((rx, ry), (rx, rz), (ry, rz)))
+    denom = math.sqrt(max(0.0, (1 - rxz ** 2) * (1 - ryz ** 2)))
+    if denom == 0 or not np.isfinite(denom):
+        return np.nan, np.nan, n
+ 
+    rho = max(-1.0, min(1.0, float((rxy - rxz * ryz) / denom)))
+    if abs(rho) >= 1.0:
+        return rho, 0.0, n
+    df = n - 3
+    tstat = rho * math.sqrt(df / (1 - rho ** 2))
+    return rho, float(2 * t_dist.sf(abs(tstat), df)), n
+ 
+def correlation_rows(support, meta, recalls=("top1_recall", "top5_recall")):
+    """One Table S5 row per recall metric for one (run, split) support table.
+    """
+    rows = []
+    coll, _, _ = spearman(support["n_specimens"], support["n_vertebrae"])
+    for rec in recalls:
+        if rec not in support.columns or support[rec].isna().all():
+            continue
+        rho_s, p_s, n = spearman(support[rec], support["n_specimens"])
+        rho_v, p_v, _ = spearman(support[rec], support["n_vertebrae"])
+        prho_s, pp_s, _ = partial_spearman(support[rec], support["n_specimens"],
+                                           support["n_vertebrae"])
+        prho_v, pp_v, _ = partial_spearman(support[rec], support["n_vertebrae"],
+                                           support["n_specimens"])
+        rows.append({**meta, "metric": rec, "n_classes": n,
+                     "rho_specimens": rho_s, "p_specimens": p_s,
+                     "rho_vertebrae": rho_v, "p_vertebrae": p_v,
+                     "partial_rho_specimens": prho_s, "partial_p_specimens": pp_s,
+                     "partial_rho_vertebrae": prho_v, "partial_p_vertebrae": pp_v,
+                     "rho_specimens_vs_vertebrae": coll})
+    return rows
+ 
+def write_supplement(per_class, corr, outdir, quiet=False):
+    """Table S4 (per-class counts and recall) and Table S5 (its correlations)."""
+    written = []
+    if per_class:
+        s4 = pd.concat(per_class, ignore_index=True)
+        lead = [c for c in ("run", "split", "category") if c in s4.columns]
+        s4 = s4[lead + [c for c in s4.columns if c not in lead]]
+        s4[["top1_recall", "top5_recall"]] = s4[["top1_recall", "top5_recall"]].round(3)
+        s4 = s4.sort_values(
+            ["run", "split", "class"],
+            key=lambda c: c.map(SPLIT_ORDER) if c.name == "split" else c)
+        s4.to_csv(os.path.join(outdir, S4_NAME), index=False)
+        written.append(S4_NAME)
+ 
+    if corr:
+        s5 = pd.DataFrame(corr)
+        s5 = s5.sort_values(
+            ["run", "metric", "split"],
+            key=lambda c: c.map(SPLIT_ORDER) if c.name == "split" else c)
+        s5[s5.select_dtypes("float").columns] = s5.select_dtypes("float").round(4)
+        s5.to_csv(os.path.join(outdir, S5_NAME), index=False)
+        written.append(S5_NAME)
+        if not quiet:
+            keep = s5[s5["n_classes"] >= MIN_CLASSES_FOR_RHO]
+            print(f"\n{'=' * 92}\nRECALL vs SUPPORT (Spearman)\n{'=' * 92}")
+            print(keep.to_string(index=False) if not keep.empty else
+                  f"no condition had >= {MIN_CLASSES_FOR_RHO} classes")
+    return written
