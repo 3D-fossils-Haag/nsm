@@ -85,17 +85,14 @@ family_info = {
 def get_family(species_label):
     species_label = species_label.lower()
     for family, info in family_info.items():
-        # Check if any keyword from the family matches the species label
         if any(keyword in species_label for keyword in info['species_keywords']):
             return family, info['color']
-    # If no match is found, return a default family (e.g., 'Unknown') with a default color
     return 'Unknown', (0.52, 0.52, 0.52)  # Grey for unknown family
 
 # Add a gradient by species within family
 def make_species_cmap(family_info, species_groups, max_shift=0.4):
     species_colors = {}
     family_species_map = defaultdict(list)
-    # Group species by family
     for species in species_groups:
         family = get_family(species)
         family_species_map[family].append(species)
@@ -107,10 +104,8 @@ def make_species_cmap(family_info, species_groups, max_shift=0.4):
         center_idx = n // 2
         for i, sp in enumerate(sorted_species):
             if i == center_idx:
-                # Middle species gets base color
                 new_rgb = base_rgb
             else:
-                # Shift lightness slightly (lighter or darker)
                 shift_direction = -1 if i < center_idx else 1
                 shift_amount = (abs(i - center_idx) / (n - 1)) * max_shift
                 new_lightness = np.clip(base_hls[1] + shift_direction * shift_amount, 0, 1)
@@ -198,31 +193,22 @@ def get_life_history_marker(species, show_life_history_dict=False):
             if keyword.lower() in species:  # Partial match, case-insensitive
                 matched = True
                 return marker, info['color']
-    #if not matched:
-        #print(f"Species name '{species}' not found in life history dictionary. Run again with show_life_history_dict=True to debug.")
-    # If no match is found, print the dictionary if the option is set to True
     if show_life_history_dict:
         print("life_history_info dictionary:")
         print(life_history_info)
-    # Return default 'o' if no match found
     return 'o', life_history_info['o']['color']
 
 # Function to plot the legend for life history strategies
 def plot_life_history_legend(life_history_legend, title='Symbol Key for Species Life History Strategies', outfpath=None):
-    # Create the figure and axis
     fig, ax = plt.subplots(figsize=(6, 4))
-    # Plot dummy points for the legend
     for i, (marker, label) in enumerate(life_history_legend):
         ax.plot([], [], marker=marker, linestyle='None', markersize=10, label=label, color='black')
-    # Customize and display the legend
     ax.legend(loc='center left', frameon=False)
     ax.axis('off')
     plt.title(title)
     plt.tight_layout()
-    # Save the plot if an output file path is provided
     if outfpath:
         plt.savefig(outfpath, dpi=300, bbox_inches='tight')
-    # Show the plot
     plt.show()
 
 def calculate_region_percentages(species_groups):
@@ -258,18 +244,14 @@ def calculate_region_percentages(species_groups):
 
 # Function to calculate average percentages across species
 def calculate_average_percentages(region_percentages):
-    # Initialize sums for each region
     total_cervical = 0
     total_thoracic = 0
     total_lumbar = 0
-    # Number of species
     num_species = len(region_percentages)
-    # Sum the percentages for each region
     for counts in region_percentages.values():
         total_cervical += counts['cervical_percentage']
         total_thoracic += counts['thoracic_percentage']
         total_lumbar += counts['lumbar_percentage']
-    # Calculate average percentages
     avg_cervical = total_cervical / num_species
     avg_thoracic = total_thoracic / num_species
     avg_lumbar = total_lumbar / num_species
@@ -393,12 +375,10 @@ def plot_species_groups(normalized_species_groups, pca, PC_idx=0, life_history_i
                         plt_std=False):
     fig, ax = plt.subplots(figsize=figsize)
 
-    # 1) raw per-species lines (dim if avg requested)
     dim_alpha = 0.2 if plt_avg_std else 0.7
     if not group_by_life_hist:
         plot_raw_species(ax, normalized_species_groups, pca, PC_idx, transform_pc1, life_history_info, species_colors, dim_alpha)
 
-    # 2) overall average ±1SD
     if plt_avg_std:
         if interp_series is None or grid is None:
             raise ValueError("plt_avg_std=True requires interp_series and grid.")
@@ -416,7 +396,6 @@ def plot_species_groups(normalized_species_groups, pca, PC_idx=0, life_history_i
                 ax.plot(grid, y, '-', alpha=0.15, color=color)
         plot_overall_avg_std(ax, trajs, grid)
 
-    # 3) grouped life_history plotting (averages, peaks, std)
     if group_by_life_hist:
         if interp_series is None or grid is None:
             raise ValueError("group_by_life_hist=True requires interp_series and grid.")
@@ -429,7 +408,6 @@ def plot_species_groups(normalized_species_groups, pca, PC_idx=0, life_history_i
             avg_thoracic=avg_thoracic, avg_cervical=avg_cervical,
             plt_std=plt_std)
 
-    # finalize
     ax.set_xlabel("Normalized Vertebra Number (%)")
     ax.set_ylabel(f"PC{PC_idx+1}: {(pca.explained_variance_ratio_[PC_idx]) * 100:.2f}%")
     ax.set_title(f"PC{PC_idx+1} vs Normalized Vertebra Number {suffix}".strip())
@@ -511,32 +489,25 @@ def get_trait(species_name, sdf):
 
 # Function to plot the legend for life history strategies
 def plot_life_history_legend(legend_items, title='Symbol Key for Species Life History Strategies', outfpath=None):
-    # Create the figure and axis
     fig, ax = plt.subplots(figsize=(6, 4))
-    # Plot dummy points for the legend
     for i, (marker, label) in enumerate(legend_items):
         ax.plot([], [], marker=marker, linestyle='None', markersize=10, label=label, color='black')
-    # Customize and display the legend
     ax.legend(loc='center left', frameon=False)
     ax.axis('off')
     plt.title(title)
     plt.tight_layout()
-    # Save the plot if an output file path is provided
     if outfpath:
         plt.savefig(outfpath, dpi=300, bbox_inches='tight')
-    # Show the plot
     plt.show()
 
 # Function to generate the legend for family colors
 def plot_family_color_legend(family_colors):
-    # Create a list of patches and labels for the legend
     patches = []
     labels = []
     for family, color in family_colors.items():
         patch = mpatches.Patch(color=color, label=family)
         patches.append(patch)
         labels.append(family)
-    # Create the legend
     plt.figure(figsize=(8, 6))
     plt.legend(handles=patches, labels=labels, loc='center left', bbox_to_anchor=(1, 0.5), title="Family Colors")
     plt.axis('off')  # Turn off the axis since we only want the legend
@@ -991,3 +962,91 @@ def dumbbell_plot(df, out_path, ref_col, cmp_col, colors, segments=None, bands=N
     plt.savefig(out_path, dpi=300, bbox_inches="tight")
     plt.show()
     print(f"Saved → {out_path}")
+
+
+def family_legend_traces(family_base_colors):
+    return [go.Scatter(x=[None], y=[None], mode="markers",
+                       marker=dict(size=20, color=plotly_color(col), symbol="circle"),
+                       name=fam.upper(), legendgroup=fam, showlegend=True)
+           for fam, col in family_base_colors.items() if isinstance(fam, str)]
+
+def pc_pair_grid(datasets, pc_i, pc_j, title, specimens, out_dir,
+                 family_base_colors=None, axis_prefix="PC", outstem=None,
+                 width=2100, height=800, show_legend=True, color_col="color", show=True):
+    fig = make_subplots(rows=1, cols=len(datasets), subplot_titles=[d[0] for d in datasets],
+                        horizontal_spacing=0.06)
+    for col, (panel_title, scores, prop) in enumerate(datasets, start=1):
+        groups = defaultdict(list)
+        for idx, row in specimens.iterrows():
+            groups[row["specimen_id"]].append((row["vertebra"], scores[idx, pc_i], scores[idx, pc_j], row["color"]))
+        for name, points in groups.items():
+            points_sorted = sorted(points, key=sort_key)
+            vlabs, xv, yv, colors = zip(*points_sorted)
+            fig.add_trace(go.Scatter(x=xv, y=yv, mode="markers", name=name,
+                                     legendgroup=name, showlegend=(col == 1),
+                                     marker=dict(color=plotly_color(colors[0]), size=6, symbol="circle"),
+                                     text=vlabs,
+                                     hovertemplate=f"Specimen: {name}<br>Vertebra: %{{text}}<extra></extra>"),
+                          row=1, col=col)
+        xlab = f"{axis_prefix}{pc_i+1}: {100*prop[pc_i]:.2f}%" if prop is not None else f"{axis_prefix}{pc_i+1}"
+        ylab = f"{axis_prefix}{pc_j+1}: {100*prop[pc_j]:.2f}%" if prop is not None else f"{axis_prefix}{pc_j+1}"
+        fig.update_xaxes(title_text=xlab, row=1, col=col)
+        anchor = f"x{col}" if col > 1 else "x"
+        fig.update_yaxes(title_text=ylab, row=1, col=col, scaleanchor=anchor, scaleratio=1)
+    fig.update_layout(width=width, height=height, title=title, plot_bgcolor="white",
+                      legend=dict(x=1.02, y=0.5, xanchor="left", yanchor="middle"))
+
+    if outstem:
+        fig.write_html(str(out_dir / f"{outstem}.html"), include_plotlyjs="cdn") 
+        fig_png = go.Figure(fig)              
+        for tr in fig_png.data:
+            tr.showlegend = False               
+            if tr.marker.symbol == "circle" and tr.x[0] is not None:  
+                tr.marker.size = 12                                      
+        for ann in fig_png.layout.annotations:    
+            ann.text = ""
+        fig_png.update_layout(font=dict(size=50))
+        fig_png.update_layout(title=None, margin=dict(t=40, b=150))
+        fig_png.update_xaxes(title_font=dict(size=50))
+        fig_png.update_yaxes(title_font=dict(size=50))
+        fig_png.update_xaxes(showticklabels=False, ticks="outside", ticklen=10, tickwidth=2,
+                            showline=True, linewidth=2, linecolor="black", mirror=True)
+        fig_png.update_yaxes(showticklabels=False, ticks="outside", ticklen=10, tickwidth=2,
+                            showline=True, linewidth=2, linecolor="black", mirror=True)
+        if show_legend:
+            for tr in family_legend_traces(family_base_colors):
+                fig_png.add_trace(tr)
+            fig_png.update_layout(title=None, margin=dict(t=40, b=150),
+                                  legend=dict(orientation="h", x=0.5, xanchor="center",
+                                             y=-0.25, yanchor="top", font=dict(size=45)))
+        else:
+            fig_png.update_layout(title=None, margin=dict(t=40, b=40), showlegend=False)
+
+        fig_png.write_image(str(out_dir / f"{outstem}.png"))
+
+    fig.show()
+    return fig
+
+def tsne_scores(X, n_dim_cap=50):
+    from sklearn.manifold import TSNE
+    if X.shape[1] > n_dim_cap:
+        X = X[:, :n_dim_cap]
+    return TSNE(n_components=2, perplexity=30, learning_rate=200, early_exaggeration=24,
+               n_iter_without_progress=2000, metric="cosine", random_state=42).fit_transform(X)
+
+def umap_scores(X, n_dim_cap=50, n_neighbors=5, min_dist=2, spread=3, n_epochs=500, repulsion_strength=3.0):
+    import umap.umap_ as umap
+    if X.shape[1] > n_dim_cap:
+        X = X[:, :n_dim_cap]
+    reducer = umap.UMAP(n_components=2, n_neighbors=n_neighbors, min_dist=min_dist, spread=spread,
+                        n_epochs=n_epochs, repulsion_strength=repulsion_strength, random_state=42)
+    return reducer.fit_transform(X)
+
+def export_scores(name, scores, specimens, out_dir, n_components=4,
+                  id_cols=("specimen_id", "vertebra", "family", "genus", "species", "trait")):
+    export = specimens[list(id_cols)].copy()
+    for i in range(min(n_components, scores.shape[1])):
+        export[f"{name}{i+1}"] = scores[:, i]
+    export = export.sort_values(["family", "genus", "species", "vertebra"])
+    export.to_csv(out_dir / f"{name.lower()}_points_for_stats.csv", index=False)
+    return export
