@@ -605,7 +605,7 @@ def crop_top_right(combined, width, height):
     return combined[:height, width:]
  
 def build_warp_grid(pca, mean_lms, atlas_mesh, out_dir, label, renderers, rot_matrix,
-                    width, height, n_pcs=4, n_steps=4, bg_cols=None):
+                    width, height, n_pcs=4, n_steps=4, amplify=1.0, bg_cols=None):
     """Render each cell and save as individual PNG — no in-memory assembly."""
     os.makedirs(out_dir, exist_ok=True)
     mat = make_material()
@@ -617,7 +617,7 @@ def build_warp_grid(pca, mean_lms, atlas_mesh, out_dir, label, renderers, rot_ma
         os.makedirs(pc_dir, exist_ok=True)
  
         observed = pca["x"][:, pc_idx]
-        scores   = np.linspace(observed.max(), observed.min(), n_steps)
+        scores   = amplify * np.linspace(observed.max(), observed.min(), n_steps)
         bg_color = bg_cols[pc_idx]
  
         for r in renderers:
